@@ -270,7 +270,7 @@ static BOOL buildGeistCamSources(void) {
         geistcam_warnf("buildGeistCamSources: no HELLO from feeder within 5s — "
                          "interpose will fall back to Apple's default sim camera. "
                          "If you expected GeistCam to be active, ensure "
-                         "GeistCameraSession.start() runs before the app calls "
+                         "GeistCamSession.start() runs before the app calls "
                          "AVCaptureDevice.devices.");
         return NO;
     }
@@ -319,7 +319,7 @@ static CFArrayRef geistcam_FigCaptureSourceCopySources(void) {
         // default sim camera (the standard test pattern) so the iOS app
         // doesn't see an empty camera list. Happens when the Mac app crashed
         // and the stranded DYLD_INSERT_LIBRARIES still loaded our shim, or
-        // when the lib's GeistCameraSession.start() never got called.
+        // when the lib's GeistCamSession.start() never got called.
         geistcam_warnf("interpose: no GeistCam feeder — falling back to Apple's default sim camera");
         return FigCaptureSourceCopySources();
     }

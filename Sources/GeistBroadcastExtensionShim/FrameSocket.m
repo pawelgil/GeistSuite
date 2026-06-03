@@ -1,5 +1,5 @@
 #import "FrameSocket.h"
-#import "GeistShimCore.h"
+#import "GeistBroadcastShimCore.h"
 #import "ShimLog.h"
 #import "SocketIO.h"
 #import "Wire.h"

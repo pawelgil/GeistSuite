@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import IOSurface
 import Synchronization
+import GeistKit
 
 /// `stop()` synchronously drains in-flight callbacks before returning, so no
 /// frame can arrive on a stopped emitter. A second `start(receiver:)` before

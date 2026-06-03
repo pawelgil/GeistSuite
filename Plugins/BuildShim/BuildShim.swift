@@ -6,53 +6,65 @@ struct BuildShim: BuildToolPlugin {
     private static let simulatorTarget = "arm64-apple-ios18.0-simulator"
     private static let trackedExtensions: Set<String> = ["m", "h", "c"]
 
-    func createBuildCommands(context: PluginContext, target _: Target) throws -> [Command] {
+    func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] {
         let packageRoot = context.package.directoryURL
         let sourcesRoot = packageRoot.appending(path: "Sources")
         let outputDir = context.pluginWorkDirectoryURL
 
-        let shimCoreDir = sourcesRoot.appending(path: "GeistShimCore")
-        let shimCoreCompileSources = try Self.gatherSources(under: shimCoreDir, extensions: ["m", "c"])
-        let shimCoreInputs = try Self.gatherSources(under: shimCoreDir, extensions: Self.trackedExtensions)
+        let sharedShimDir = sourcesRoot.appending(path: "SharedShimCore")
+        let sharedCompile = try Self.gather(under: sharedShimDir, extensions: ["m", "c"])
+        let sharedInputs = try Self.gather(under: sharedShimDir, extensions: Self.trackedExtensions)
 
-        return try [
-            Self.makeBuildCommand(
-                name: "GeistBroadcastAppShim",
-                modeDir: sourcesRoot.appending(path: "GeistAppShim"),
-                outputDir: outputDir,
-                shimCoreDir: shimCoreDir,
-                shimCoreCompileSources: shimCoreCompileSources,
-                shimCoreInputs: shimCoreInputs
-            ),
-            Self.makeBuildCommand(
-                name: "GeistBroadcastExtensionShim",
-                modeDir: sourcesRoot.appending(path: "GeistBroadcastExtensionShim"),
-                outputDir: outputDir,
-                shimCoreDir: shimCoreDir,
-                shimCoreCompileSources: shimCoreCompileSources,
-                shimCoreInputs: shimCoreInputs
-            ),
-            Self.makeBuildCommand(
-                name: "GeistCamShim",
-                modeDir: sourcesRoot.appending(path: "GeistCamShim"),
-                outputDir: outputDir,
-                shimCoreDir: shimCoreDir,
-                shimCoreCompileSources: shimCoreCompileSources,
-                shimCoreInputs: shimCoreInputs
-            ),
-        ]
+        switch target.name {
+        case "GeistCamera":
+            let cameraShimCoreDir = sourcesRoot.appending(path: "GeistCameraShimCore")
+            let cameraShimCoreCompile = try Self.gather(under: cameraShimCoreDir, extensions: ["m", "c"])
+            let cameraShimCoreInputs = try Self.gather(under: cameraShimCoreDir, extensions: Self.trackedExtensions)
+            return [
+                try Self.buildCommand(
+                    name: "GeistCamShim",
+                    modeDir: sourcesRoot.appending(path: "GeistCamShim"),
+                    outputDir: outputDir,
+                    headerSearchDirs: [sharedShimDir, cameraShimCoreDir],
+                    sharedCompile: sharedCompile + cameraShimCoreCompile,
+                    sharedInputs: sharedInputs + cameraShimCoreInputs
+                ),
+            ]
+        case "GeistBroadcast":
+            let broadcastShimCoreDir = sourcesRoot.appending(path: "GeistBroadcastShimCore")
+            let broadcastShimCoreCompile = try Self.gather(under: broadcastShimCoreDir, extensions: ["m", "c"])
+            let broadcastShimCoreInputs = try Self.gather(under: broadcastShimCoreDir, extensions: Self.trackedExtensions)
+            return [
+                try Self.buildCommand(
+                    name: "GeistBroadcastAppShim",
+                    modeDir: sourcesRoot.appending(path: "GeistBroadcastAppShim"),
+                    outputDir: outputDir,
+                    headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
+                    sharedCompile: sharedCompile + broadcastShimCoreCompile,
+                    sharedInputs: sharedInputs + broadcastShimCoreInputs
+                ),
+                try Self.buildCommand(
+                    name: "GeistBroadcastExtensionShim",
+                    modeDir: sourcesRoot.appending(path: "GeistBroadcastExtensionShim"),
+                    outputDir: outputDir,
+                    headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
+                    sharedCompile: sharedCompile + broadcastShimCoreCompile,
+                    sharedInputs: sharedInputs + broadcastShimCoreInputs
+                ),
+            ]
+        default:
+            return []
+        }
     }
 
-    private static func makeBuildCommand(
-        name: String,
-        modeDir: URL,
-        outputDir: URL,
-        shimCoreDir: URL,
-        shimCoreCompileSources: [URL],
-        shimCoreInputs: [URL]
-    ) throws -> Command {
-        let modeCompileSources = try gatherSources(under: modeDir, extensions: ["m"])
-        let modeInputs = try gatherSources(under: modeDir, extensions: trackedExtensions)
+    private static func buildCommand(name: String,
+                                      modeDir: URL,
+                                      outputDir: URL,
+                                      headerSearchDirs: [URL],
+                                      sharedCompile: [URL],
+                                      sharedInputs: [URL]) throws -> Command {
+        let modeCompile = try gather(under: modeDir, extensions: ["m"])
+        let modeInputs = try gather(under: modeDir, extensions: trackedExtensions)
         let dylib = outputDir.appending(path: "\(name).dylib")
 
         var args: [String] = [
@@ -68,24 +80,26 @@ struct BuildShim: BuildToolPlugin {
             "-Wl,-undefined,dynamic_lookup",
             "-fobjc-arc",
             "-O0", "-g",
-            "-I", shimCoreDir.path(),
-            "-I", shimCoreDir.appending(path: "include").path(),
-            "-I", modeDir.path(),
-            "-install_name", dylib.path(),
-            "-o", dylib.path(),
         ]
-        args.append(contentsOf: (shimCoreCompileSources + modeCompileSources).map { $0.path() })
+        for dir in headerSearchDirs {
+            args.append(contentsOf: ["-I", dir.path()])
+            args.append(contentsOf: ["-I", dir.appending(path: "include").path()])
+        }
+        args.append(contentsOf: ["-I", modeDir.path()])
+        args.append(contentsOf: ["-install_name", dylib.path()])
+        args.append(contentsOf: ["-o", dylib.path()])
+        args.append(contentsOf: (sharedCompile + modeCompile).map { $0.path() })
 
         return .buildCommand(
             displayName: "Compile \(name).dylib for iOS Simulator",
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: args,
-            inputFiles: shimCoreInputs + modeInputs,
+            inputFiles: sharedInputs + modeInputs,
             outputFiles: [dylib]
         )
     }
 
-    private static func gatherSources(under directory: URL, extensions: Set<String>) throws -> [URL] {
+    private static func gather(under directory: URL, extensions: Set<String>) throws -> [URL] {
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
