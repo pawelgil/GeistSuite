@@ -153,7 +153,7 @@ final class MenuBuilder {
         do {
             url = try IssueReport.generate()
         } catch {
-            Log.warn("IssueReport.generate failed: \(error)")
+            log.warn("IssueReport.generate failed: \(error)")
             return
         }
         let alert = NSAlert()
@@ -259,7 +259,7 @@ final class MenuBuilder {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         })
         sub.addItem(ClosureMenuItem(title: "Uninstall") {
-            do { try CLIInstaller.uninstall() } catch { Log.warn("CLI uninstall failed: \(error)") }
+            do { try CLIInstaller.uninstall() } catch { log.warn("CLI uninstall failed: \(error)") }
         })
         return sub
     }
@@ -377,11 +377,11 @@ final class MenuBuilder {
         // for macOSCamera. Lazy-prompt-on-AVCaptureSession-start fails silently.
         Task { [weak self] in
             guard await Self.requestPermission(.video) else {
-                Log.notice("Camera permission denied")
+                log.notice("Camera permission denied")
                 return
             }
             guard await Self.requestPermission(.audio) else {
-                Log.notice("Microphone permission denied")
+                log.notice("Microphone permission denied")
                 return
             }
             await MainActor.run {

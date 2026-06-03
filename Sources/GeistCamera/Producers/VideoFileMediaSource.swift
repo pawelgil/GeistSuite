@@ -127,7 +127,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
             cycleOffsetNs &+= assetDurationNs
             if !completed { break }
         }
-        Log.notice("VideoFileMediaSource ended for \(url.lastPathComponent)")
+        log.notice("VideoFileMediaSource ended for \(url.lastPathComponent)")
     }
 
     private static func runOneCycle(asset: AVURLAsset,
@@ -140,7 +140,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
         let videoTracks = asset.tracks(withMediaType: .video)
         let audioTracks = asset.tracks(withMediaType: .audio)
         guard let videoTrack = videoTracks.first else {
-            Log.warn("VideoFileMediaSource: asset has no video track")
+            log.warn("VideoFileMediaSource: asset has no video track")
             return false
         }
 
@@ -165,7 +165,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
         do {
             reader = try AVAssetReader(asset: asset)
         } catch {
-            Log.warn("VideoFileMediaSource: AVAssetReader init failed: \(error)")
+            log.warn("VideoFileMediaSource: AVAssetReader init failed: \(error)")
             return false
         }
         if startAtNs > 0 {
@@ -178,7 +178,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
         let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: videoSettings)
         videoOut.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOut) else {
-            Log.warn("VideoFileMediaSource: cannot add video output")
+            log.warn("VideoFileMediaSource: cannot add video output")
             return false
         }
         reader.add(videoOut)
@@ -191,7 +191,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
                 reader.add(o)
                 audioOut = o
             } else {
-                Log.warn("VideoFileMediaSource: cannot add audio output — proceeding video-only")
+                log.warn("VideoFileMediaSource: cannot add audio output — proceeding video-only")
                 audioOut = nil
             }
         } else {
@@ -199,7 +199,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
         }
 
         guard reader.startReading() else {
-            Log.warn("VideoFileMediaSource: startReading failed: \(reader.error?.localizedDescription ?? "unknown")")
+            log.warn("VideoFileMediaSource: startReading failed: \(reader.error?.localizedDescription ?? "unknown")")
             return false
         }
 
@@ -214,7 +214,7 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
                 let status = reader.status
                 reader.cancelReading()
                 if status == .failed {
-                    Log.warn("VideoFileMediaSource: reader failed: \(reader.error?.localizedDescription ?? "unknown")")
+                    log.warn("VideoFileMediaSource: reader failed: \(reader.error?.localizedDescription ?? "unknown")")
                 }
                 return status == .completed
             }

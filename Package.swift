@@ -5,6 +5,7 @@ let package = Package(
     name: "Geist",
     platforms: [.macOS(.v15)],
     products: [
+        .library(name: "GeistKit", targets: ["GeistKit"]),
         .library(name: "GeistCamera", targets: ["GeistCamera"]),
         .library(name: "GeistBroadcast", targets: ["GeistBroadcast"]),
     ],

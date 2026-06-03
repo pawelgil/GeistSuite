@@ -51,7 +51,7 @@ struct AppexSpawner: AppexSpawning, Sendable {
         ))
         if result.exitStatus != 0 {
             let stderr = String(decoding: result.stderr, as: UTF8.self)
-            Log.warn("AppexSpawner: simctl spawn exited \(result.exitStatus): \(stderr)")
+            log.warn("AppexSpawner: simctl spawn exited \(result.exitStatus): \(stderr)")
         }
     }
 }

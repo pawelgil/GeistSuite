@@ -83,7 +83,7 @@ struct AppexStager: AppexStaging, Sendable {
             guard var plist = try PropertyListSerialization.propertyList(
                 from: entData, format: nil
             ) as? [String: Any] else {
-                Log.warn("AppexStager: entitlements scrub skipped — plist not a dict")
+                log.warn("AppexStager: entitlements scrub skipped — plist not a dict")
                 return
             }
             plist.removeValue(forKey: "application-identifier")
@@ -92,7 +92,7 @@ struct AppexStager: AppexStaging, Sendable {
             )
             try fileSystem.write(cleaned, toPath: entitlementsFile)
         } catch {
-            Log.warn("AppexStager: entitlements scrub failed: \(error)")
+            log.warn("AppexStager: entitlements scrub failed: \(error)")
         }
     }
 

@@ -1,5 +1,5 @@
 import Foundation
-import GeistBroadcast
+import GeistKit
 
 enum LogPaths {
     static let logsDir = FileLogSink.logsDir

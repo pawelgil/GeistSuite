@@ -65,7 +65,7 @@ final class HostDetector: HostDetecting, Sendable {
         do {
             try handler.perform(requests)
         } catch {
-            Log.warn("detection failed: \(error)")
+            log.warn("detection failed: \(error)")
             return []
         }
 

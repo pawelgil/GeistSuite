@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import GeistCamera
 
 enum CLIInstaller {
     static let candidateDirs: [String] = [
@@ -49,7 +48,7 @@ enum CLIInstaller {
         } else {
             try copyWithAdmin(source: bundled, dest: dest)
         }
-        Log.notice("CLIInstaller: installed \(dest) (from \(bundled))")
+        log.notice("CLIInstaller: installed \(dest) (from \(bundled))")
         return dest
     }
 
@@ -57,7 +56,7 @@ enum CLIInstaller {
         switch currentState() {
         case .installed(let path), .outdated(let path):
             try remove(path: path)
-            Log.notice("CLIInstaller: removed \(path)")
+            log.notice("CLIInstaller: removed \(path)")
         case .foreign, .notInstalled:
             return
         }

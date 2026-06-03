@@ -165,7 +165,7 @@ public actor GeistCamSession: SessionDriving {
             throw .recordingInProgress
         }
         guard slot.wireIndex != nil else {
-            Log.warn("slot \(slot.debugLabel) not supported by v1 shim — ignored")
+            log.warn("slot \(slot.debugLabel) not supported by v1 shim — ignored")
             return
         }
         guard let producer = await makeProducer(for: source, slot: slot) else {
@@ -214,15 +214,15 @@ public actor GeistCamSession: SessionDriving {
             throw .recordingInProgress
         }
         if videoSlot == nil && audioSlot == nil {
-            Log.warn("attachMediaSource called with no slots")
+            log.warn("attachMediaSource called with no slots")
             return
         }
         if let v = videoSlot, v.wireIndex == nil {
-            Log.warn("attachMediaSource: video slot \(v.debugLabel) not supported by v1 shim")
+            log.warn("attachMediaSource: video slot \(v.debugLabel) not supported by v1 shim")
             return
         }
         if let a = audioSlot, a.wireIndex == nil {
-            Log.warn("attachMediaSource: audio slot \(a.debugLabel) not supported by v1 shim")
+            log.warn("attachMediaSource: audio slot \(a.debugLabel) not supported by v1 shim")
             return
         }
 
@@ -301,9 +301,9 @@ public actor GeistCamSession: SessionDriving {
             if let v = reg.videoSlot, let af = lastActiveFormat[v] {
                 reg.source.reformat(to: af)
             }
-            Log.notice("started media source: video=\(reg.videoSlot?.debugLabel ?? "-") audio=\(reg.audioSlot?.debugLabel ?? "-")")
+            log.notice("started media source: video=\(reg.videoSlot?.debugLabel ?? "-") audio=\(reg.audioSlot?.debugLabel ?? "-")")
         } catch {
-            Log.warn("media source failed to start: \(error)")
+            log.warn("media source failed to start: \(error)")
             reg.fanout.setVideoSink(nil)
             reg.fanout.setAudioSink(nil)
             reg.videoSink = nil
@@ -422,47 +422,47 @@ public actor GeistCamSession: SessionDriving {
         switch source {
         case .customVideo(let p):
             guard !isAudioSlot else {
-                Log.warn("video producer attached to audio slot '\(slot.debugLabel)' — ignored")
+                log.warn("video producer attached to audio slot '\(slot.debugLabel)' — ignored")
                 return nil
             }
             return .video(p)
         case .customAudio(let p):
             guard isAudioSlot else {
-                Log.warn("audio producer attached to video slot '\(slot.debugLabel)' — ignored")
+                log.warn("audio producer attached to video slot '\(slot.debugLabel)' — ignored")
                 return nil
             }
             return .audio(p)
         case .macOSCamera(let spec):
             guard !isAudioSlot else {
-                Log.warn("macOSCamera attached to audio slot '\(slot.debugLabel)' — use .macOSMicrophone for audio")
+                log.warn("macOSCamera attached to audio slot '\(slot.debugLabel)' — use .macOSMicrophone for audio")
                 return nil
             }
             do {
                 return .video(try await SharedMacOSCameraSource.producer(device: spec))
             } catch {
-                Log.warn("macOS camera init failed: \(error)")
+                log.warn("macOS camera init failed: \(error)")
                 return nil
             }
         case .macOSMicrophone(let spec):
             guard isAudioSlot else {
-                Log.warn("macOSMicrophone attached to video slot '\(slot.debugLabel)' — use .macOSCamera for video")
+                log.warn("macOSMicrophone attached to video slot '\(slot.debugLabel)' — use .macOSCamera for video")
                 return nil
             }
             do {
                 return .audio(try await MacOSMicrophoneProducer(spec))
             } catch {
-                Log.warn("MacOSMicrophoneProducer init failed: \(error)")
+                log.warn("MacOSMicrophoneProducer init failed: \(error)")
                 return nil
             }
         case .stillImage(let url, let fps):
             guard !isAudioSlot else {
-                Log.warn("stillImage attached to audio slot '\(slot.debugLabel)' — ignored")
+                log.warn("stillImage attached to audio slot '\(slot.debugLabel)' — ignored")
                 return nil
             }
             do {
                 return .video(try StillImageProducer(url: url, fps: fps))
             } catch {
-                Log.warn("StillImageProducer init failed for \(url.lastPathComponent): \(error)")
+                log.warn("StillImageProducer init failed for \(url.lastPathComponent): \(error)")
                 return nil
             }
         }
@@ -533,36 +533,36 @@ public actor GeistCamSession: SessionDriving {
         switch msg.type {
         case .helloAck:
             guard let ack = WireHelloAck.decode(msg.payload) else { return }
-            Log.notice("HELLO_ACK version=\(ack.version) initial_active=\(ack.initialActive)")
+            log.notice("HELLO_ACK version=\(ack.version) initial_active=\(ack.initialActive)")
             for (idx, active) in ack.initialActive.enumerated() {
                 applySlotActive(wireIndex: UInt32(idx), active: active != 0)
             }
         case .slotActive:
             guard let m = WireSlotActive.decode(msg.payload) else { return }
-            Log.notice("SLOT_ACTIVE slot=\(m.slot) active=\(m.active)")
+            log.notice("SLOT_ACTIVE slot=\(m.slot) active=\(m.active)")
             applySlotActive(wireIndex: m.slot, active: m.active != 0)
         case .demandUpdate:
             guard let m = WireDemandUpdate.decode(msg.payload) else { return }
             let demand = SlotDemand(wantsQR: m.wantsQR != 0, wantsFace: m.wantsFace != 0)
-            Log.notice("DEMAND_UPDATE slot=\(m.slot) qr=\(demand.wantsQR) face=\(demand.wantsFace)")
+            log.notice("DEMAND_UPDATE slot=\(m.slot) qr=\(demand.wantsQR) face=\(demand.wantsFace)")
             demandRegistry.update(slot: m.slot, demand: demand)
         case .recordingState:
             guard let m = WireRecordingState.decode(msg.payload) else { return }
             let recording = m.active != 0
-            Log.notice("RECORDING_STATE → \(recording ? "active" : "idle")")
+            log.notice("RECORDING_STATE → \(recording ? "active" : "idle")")
             isRecording.store(recording, ordering: .relaxed)
         case .activeFormat:
             guard let m = WireActiveFormat.decode(msg.payload) else { return }
             handleActiveFormatChanged(m)
         default:
-            Log.warn("unexpected inbound message \(msg.type)")
+            log.warn("unexpected inbound message \(msg.type)")
         }
     }
 
     private func handleActiveFormatChanged(_ m: WireActiveFormat) {
         let slot = slotForWireIndex(m.slot)
         guard let pixfmt = PixelFormat(osType: m.pixelFormat) else {
-            Log.warn("ACTIVE_FORMAT slot=\(m.slot): unsupported pixfmt 0x\(String(m.pixelFormat, radix: 16))")
+            log.warn("ACTIVE_FORMAT slot=\(m.slot): unsupported pixfmt 0x\(String(m.pixelFormat, radix: 16))")
             return
         }
         let fps: Int
@@ -577,7 +577,7 @@ public actor GeistCamSession: SessionDriving {
         }
         let target = VideoSlotFormat(width: Int(m.width), height: Int(m.height),
                                      pixelFormat: pixfmt, fps: fps)
-        Log.notice("ACTIVE_FORMAT slot=\(slot.debugLabel) → \(m.width)x\(m.height) \(pixfmt)")
+        log.notice("ACTIVE_FORMAT slot=\(slot.debugLabel) → \(m.width)x\(m.height) \(pixfmt)")
         lastActiveFormat[slot] = target
         videoSinks[slot]?.updateExpectedFormat(target)
         if case .video(let p) = producers[slot] {
@@ -603,7 +603,7 @@ public actor GeistCamSession: SessionDriving {
         if shouldLogMissing { loggedActivationsWithoutSource.insert(slot) }
 
         if shouldLogMissing {
-            Log.notice("slot '\(slot.debugLabel)' activated with no source — preview will be blank")
+            log.notice("slot '\(slot.debugLabel)' activated with no source — preview will be blank")
             delegate?.session(self, didActivateSlotWithoutSource: slot)
         }
         guard let producer else { return }
@@ -672,9 +672,9 @@ public actor GeistCamSession: SessionDriving {
                 try p.start(into: sink)
             }
             runningProducers.insert(slot)
-            Log.notice("started producer for \(slot.debugLabel)")
+            log.notice("started producer for \(slot.debugLabel)")
         } catch {
-            Log.warn("producer failed to start for \(slot.debugLabel): \(error)")
+            log.warn("producer failed to start for \(slot.debugLabel): \(error)")
         }
     }
 
@@ -687,7 +687,7 @@ public actor GeistCamSession: SessionDriving {
         producer.stop()
         runningProducers.remove(slot)
         videoSinks.removeValue(forKey: slot)
-        Log.notice("stopped producer for \(slot.debugLabel)")
+        log.notice("stopped producer for \(slot.debugLabel)")
     }
 
     private func handleDisconnected() {

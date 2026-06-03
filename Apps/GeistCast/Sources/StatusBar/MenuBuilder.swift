@@ -72,7 +72,7 @@ struct MenuBuilder {
         do {
             url = try IssueReport.generate()
         } catch {
-            Log.warn("IssueReport.generate failed: \(error)")
+            log.warn("IssueReport.generate failed: \(error)")
             return
         }
         let alert = NSAlert()

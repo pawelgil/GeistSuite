@@ -1,5 +1,4 @@
 import Foundation
-import GeistCamera
 
 protocol SimctlRunning: Sendable {
     func runSimctl(udid: String, args: [String]) -> Bool
@@ -17,14 +16,14 @@ struct DefaultSimctlRunner: SimctlRunning {
         do {
             try process.run()
         } catch {
-            Log.error("ShimInjector: failed to launch simctl: \(error)")
+            log.error("ShimInjector: failed to launch simctl: \(error)")
             return false
         }
         process.waitUntilExit()
         if process.terminationStatus != 0 {
             let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
                              encoding: .utf8) ?? ""
-            Log.warn("ShimInjector: simctl exit \(process.terminationStatus) for \(udid): \(err)")
+            log.warn("ShimInjector: simctl exit \(process.terminationStatus) for \(udid): \(err)")
             return false
         }
         return true
@@ -62,7 +61,7 @@ struct ShimInjector {
 
     @discardableResult
     func injectDylib(_ dylibPath: String, intoSimulator udid: String) -> Bool {
-        Log.notice("ShimInjector.inject: udid=\(udid) dylib=\(dylibPath)")
+        log.notice("ShimInjector.inject: udid=\(udid) dylib=\(dylibPath)")
         let existing = runner.captureSimctl(udid: udid,
                                               args: ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"]) ?? ""
         let merged = Self.appending(dylibPath, to: existing)
@@ -70,13 +69,13 @@ struct ShimInjector {
                                          args: ["launchctl", "setenv", "DYLD_INSERT_LIBRARIES", merged])
         let logOk = runner.runSimctl(udid: udid,
                                        args: ["launchctl", "setenv", "GEISTCAM_LOG", shimLogPath])
-        Log.notice("ShimInjector.inject result: udid=\(udid) dylibOk=\(dylibOk) logOk=\(logOk)")
+        log.notice("ShimInjector.inject result: udid=\(udid) dylibOk=\(dylibOk) logOk=\(logOk)")
         return dylibOk
     }
 
     @discardableResult
     func uninjectDylib(_ dylibPath: String, fromSimulator udid: String) -> Bool {
-        Log.notice("ShimInjector.uninject: udid=\(udid) dylib=\(dylibPath)")
+        log.notice("ShimInjector.uninject: udid=\(udid) dylib=\(dylibPath)")
         _ = runner.runSimctl(udid: udid, args: ["launchctl", "unsetenv", "GEISTCAM_LOG"])
         let existing = runner.captureSimctl(udid: udid,
                                               args: ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"]) ?? ""
@@ -87,7 +86,7 @@ struct ShimInjector {
         } else {
             ok = runner.runSimctl(udid: udid, args: ["launchctl", "setenv", "DYLD_INSERT_LIBRARIES", remaining])
         }
-        Log.notice("ShimInjector.uninject result: udid=\(udid) ok=\(ok)")
+        log.notice("ShimInjector.uninject result: udid=\(udid) ok=\(ok)")
         return ok
     }
 

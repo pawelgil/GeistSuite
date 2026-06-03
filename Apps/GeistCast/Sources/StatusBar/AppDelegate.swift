@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import GeistBroadcast
+import GeistKit
 
 @main
 @MainActor
@@ -62,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         self.injector = LaunchctlShimInjector(process: process)
         self.dylibPath = (try? DylibInstaller.installIfNeeded())
         if dylibPath == nil {
-            Log.warn("DylibInstaller failed; auto-injection disabled.")
+            log.warn("DylibInstaller failed; auto-injection disabled.")
         }
         super.init()
     }
@@ -80,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         LogPaths.truncateSessionLogs()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        Log.notice("GeistCast launched \(version) (\(build)) on \(ProcessInfo.processInfo.operatingSystemVersionString)")
+        log.notice("GeistCast launched \(version) (\(build)) on \(ProcessInfo.processInfo.operatingSystemVersionString)")
 
         setupStatusItem()
         requestEagerPermissions()
@@ -99,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func applicationWillTerminate(_ notification: Notification) {
         let sessionCount = sessions.count
         let injectedCount = injectedSimulators.count
-        Log.notice("applicationWillTerminate: stopping \(sessionCount) sessions, uninjecting from \(injectedCount) simulators")
+        log.notice("applicationWillTerminate: stopping \(sessionCount) sessions, uninjecting from \(injectedCount) simulators")
         simulatorWatcher?.stop()
         pollTask?.cancel()
         let sessionList = Array(sessions.values)
@@ -116,14 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     do {
                         try await injector.uninjectDylib(at: dylib, fromSimulator: udid)
                     } catch {
-                        Log.warn("uninjectDylib failed at shutdown: udid=\(udid) error=\(error)")
+                        log.warn("uninjectDylib failed at shutdown: udid=\(udid) error=\(error)")
                     }
                 }
             }
             done.signal()
         }
         if done.wait(timeout: .now() + 2) == .timedOut {
-            Log.warn("applicationWillTerminate: 2s shutdown watchdog fired")
+            log.warn("applicationWillTerminate: 2s shutdown watchdog fired")
         }
     }
 
@@ -226,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             cachedEntries = fresh
             await reconcileSessions(from: fresh)
         } catch {
-            Log.warn("catalog refresh failed: \(error)")
+            log.warn("catalog refresh failed: \(error)")
         }
     }
 
@@ -238,19 +239,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         if watcher.start() {
             simulatorWatcher = watcher
-            Log.notice("EventDrivenSimulatorWatcher: observing CoreSimulator notifications")
+            log.notice("EventDrivenSimulatorWatcher: observing CoreSimulator notifications")
         } else {
-            Log.error("EventDrivenSimulatorWatcher: CoreSimulator unavailable — auto-injection disabled")
+            log.error("EventDrivenSimulatorWatcher: CoreSimulator unavailable — auto-injection disabled")
         }
     }
 
     private func handleSimulatorChange(added: Set<String>, removed: Set<String>) {
         for udid in added {
-            Log.notice("simulator booted: \(udid)")
+            log.notice("simulator booted: \(udid)")
             Task { await self.injectIfNeeded(simulator: udid) }
         }
         for udid in removed {
-            Log.notice("simulator shutdown: \(udid)")
+            log.notice("simulator shutdown: \(udid)")
             Task { await self.removeSessions(for: udid) }
         }
     }
@@ -261,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             try await injector.injectDylib(at: dylibPath, intoSimulator: simulator)
             injectedSimulators.insert(simulator)
         } catch {
-            Log.warn("dylib injection into \(simulator) failed: \(error)")
+            log.warn("dylib injection into \(simulator) failed: \(error)")
         }
     }
 
@@ -289,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             }
             if let reason = removeReason {
                 sessions.removeValue(forKey: key)
-                Log.notice("session removed (\(reason)): \(key)")
+                log.notice("session removed (\(reason)): \(key)")
                 await session.stop()
                 streamingKeys.remove(key)
                 inFlightKeys.remove(key)
@@ -307,9 +308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 )
                 try await session.start()
                 sessions[key] = session
-                Log.notice("session started: \(key)")
+                log.notice("session started: \(key)")
             } catch {
-                Log.warn("session start failed for \(key): \(error)")
+                log.warn("session start failed for \(key): \(error)")
             }
         }
         for session in sessions.values {
@@ -384,31 +385,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     // MARK: - Session delegate
 
     nonisolated func session(_: GeistBroadcastSession, broadcastStarted broadcast: Broadcast) {
-        Log.notice("broadcastStarted: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID) sim=\(broadcast.simulatorUDID)")
+        log.notice("broadcastStarted: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID) sim=\(broadcast.simulatorUDID)")
         Task { @MainActor in await self.recomputeStreamingState() }
     }
 
     nonisolated func session(_: GeistBroadcastSession, broadcastEnded broadcast: Broadcast) {
-        Log.notice("broadcastEnded: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID)")
+        log.notice("broadcastEnded: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID)")
         Task { @MainActor in await self.recomputeStreamingState() }
     }
 
     nonisolated func session(_: GeistBroadcastSession,
                               broadcast: Broadcast,
                               terminatedWithError error: Error) {
-        Log.error("broadcastTerminated: host=\(broadcast.hostAppBundleID) error=\(error)")
+        log.error("broadcastTerminated: host=\(broadcast.hostAppBundleID) error=\(error)")
         Task { @MainActor in await self.recomputeStreamingState() }
     }
 
     nonisolated func session(_: GeistBroadcastSession,
                               broadcastFailedToStart broadcast: Broadcast,
                               error: Error) {
-        Log.error("broadcastFailedToStart: host=\(broadcast.hostAppBundleID) error=\(error)")
+        log.error("broadcastFailedToStart: host=\(broadcast.hostAppBundleID) error=\(error)")
         Task { @MainActor in await self.recomputeStreamingState() }
     }
 
     nonisolated func session(_: GeistBroadcastSession, extensionConnectedFor extensionBundleID: String) {
-        Log.notice("extensionConnected: \(extensionBundleID)")
+        log.notice("extensionConnected: \(extensionBundleID)")
     }
 
     private static let idleFillColor = NSColor.tertiaryLabelColor

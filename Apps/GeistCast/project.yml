@@ -36,6 +36,8 @@ targets:
         DEVELOPMENT_TEAM: ""
     dependencies:
       - package: Geist
+        product: GeistKit
+      - package: Geist
         product: GeistBroadcast
       - target: GeistCastCLI
         embed: true
@@ -48,6 +50,8 @@ targets:
       - path: Tests
     dependencies:
       - target: GeistCast
+      - package: Geist
+        product: GeistKit
       - package: Geist
         product: GeistBroadcast
     settings:

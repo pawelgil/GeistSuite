@@ -239,12 +239,12 @@ public actor GeistBroadcastSession {
         lastMicAuth = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         micAuthPollTask = Task { [weak self] in await self?.pollMicAuth() }
         let bundle = hostBundleID, path = socketPath
-        Log.notice("[Session \(bundle)] start: listening at \(path)")
+        log.notice("[Session \(bundle)] start: listening at \(path)")
     }
 
     public func stop() {
         let bundle = hostBundleID
-        Log.notice("[Session \(bundle)] stop")
+        log.notice("[Session \(bundle)] stop")
         videoSource?.stop()
         videoSource = nil
         micSource?.stop()
@@ -407,7 +407,7 @@ public actor GeistBroadcastSession {
         switch videoCapture {
         case .simulatorScreen:
             guard let udid = UUID(uuidString: simulator) else {
-                Log.warn("Session: simulator '\(self.simulator)' is not a valid UUID; skipping simulator-screen capture")
+                log.warn("Session: simulator '\(self.simulator)' is not a valid UUID; skipping simulator-screen capture")
                 return
             }
             do {
@@ -415,7 +415,7 @@ public actor GeistBroadcastSession {
                     udid: udid, simctlSetPath: simctlSetPath
                 )
             } catch {
-                Log.warn("Session: simulator-screen capture init failed: \(error)")
+                log.warn("Session: simulator-screen capture init failed: \(error)")
                 return
             }
         case .custom(let producer):
@@ -425,7 +425,7 @@ public actor GeistBroadcastSession {
             try source.start(into: sink)
             videoSource = source
         } catch {
-            Log.warn("Session: video source start failed: \(error)")
+            log.warn("Session: video source start failed: \(error)")
         }
     }
 
@@ -448,7 +448,7 @@ public actor GeistBroadcastSession {
             try source.start(into: sink)
             micSource = source
         } catch {
-            Log.warn("Session: mic source attach failed: \(error)")
+            log.warn("Session: mic source attach failed: \(error)")
         }
     }
 
@@ -557,11 +557,11 @@ public actor GeistBroadcastSession {
 
     private func cleanupConnection(fd: Int32) async {
         if hostFD == fd {
-            Log.notice("[Session \(self.hostBundleID)] host fd closed (fd=\(fd))")
+            log.notice("[Session \(self.hostBundleID)] host fd closed (fd=\(fd))")
             hostFD = nil
         }
         if extensionFD == fd {
-            Log.notice("[Session \(self.hostBundleID)] extension fd closed (fd=\(fd)) activeBroadcasts=\(self.activeBroadcasts.count) pending=\(self.pendingBroadcast != nil)")
+            log.notice("[Session \(self.hostBundleID)] extension fd closed (fd=\(fd)) activeBroadcasts=\(self.activeBroadcasts.count) pending=\(self.pendingBroadcast != nil)")
             extensionFD = nil
             // Extension going away with an active broadcast is the only
             // signal we have that the broadcast actually ended (extension
@@ -600,7 +600,7 @@ public actor GeistBroadcastSession {
     private func ingest(_ message: WireMessage, from fd: Int32) async {
         switch message {
         case .helloHost:
-            Log.notice("[Session \(self.hostBundleID)] helloHost fd=\(fd) recording=\(!self.activeBroadcasts.isEmpty)")
+            log.notice("[Session \(self.hostBundleID)] helloHost fd=\(fd) recording=\(!self.activeBroadcasts.isEmpty)")
             hostFD = fd
             let currentBroadcast = activeBroadcasts.first
             let micAuthorized = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
@@ -611,7 +611,7 @@ public actor GeistBroadcastSession {
                  to: fd)
 
         case .helloExtension(let extensionBundleID):
-            Log.notice("[Session \(self.hostBundleID)] helloExtension bundle=\(extensionBundleID) fd=\(fd) userConfirmedStart=\(self.userConfirmedStart) prevExtFD=\(self.extensionFD ?? -1)")
+            log.notice("[Session \(self.hostBundleID)] helloExtension bundle=\(extensionBundleID) fd=\(fd) userConfirmedStart=\(self.userConfirmedStart) prevExtFD=\(self.extensionFD ?? -1)")
             // Old fd — shutdown only; closeClientFD happens in the
             // read-loop teardown so a recycled fd number can't be
             // killed by a stale close.
@@ -625,7 +625,7 @@ public actor GeistBroadcastSession {
             delegate?.session(self, extensionConnectedFor: extensionBundleID)
 
         case .userPressedStart(let micEnabled):
-            Log.notice("[Session \(self.hostBundleID)] userPressedStart micEnabled=\(micEnabled) extFD=\(self.extensionFD ?? -1)")
+            log.notice("[Session \(self.hostBundleID)] userPressedStart micEnabled=\(micEnabled) extFD=\(self.extensionFD ?? -1)")
             armBroadcast()
             userConfirmedStart = true
             if let extFD = extensionFD, let broadcast = pendingBroadcast {
@@ -637,7 +637,7 @@ public actor GeistBroadcastSession {
             }
 
         case .userCancelledStart:
-            Log.notice("[Session \(self.hostBundleID)] userCancelledStart")
+            log.notice("[Session \(self.hostBundleID)] userCancelledStart")
             launchTask?.cancel()
             launchTask = nil
             if let extFD = extensionFD {
@@ -653,7 +653,7 @@ public actor GeistBroadcastSession {
             detachVideoSource()
 
         case .userPressedStop:
-            Log.notice("[Session \(self.hostBundleID)] userPressedStop extFD=\(self.extensionFD ?? -1)")
+            log.notice("[Session \(self.hostBundleID)] userPressedStop extFD=\(self.extensionFD ?? -1)")
             if let extFD = extensionFD {
                 send(.finish, to: extFD)
             }
@@ -661,7 +661,7 @@ public actor GeistBroadcastSession {
             detachVideoSource()
 
         case .userToggledMic(let enabled):
-            Log.notice("[Session \(self.hostBundleID)] userToggledMic enabled=\(enabled)")
+            log.notice("[Session \(self.hostBundleID)] userToggledMic enabled=\(enabled)")
             if enabled {
                 attachMicSource()
             } else {
@@ -723,7 +723,7 @@ public actor GeistBroadcastSession {
             startedAt: Date()
         )
         pendingBroadcast = broadcast
-        Log.notice("[Session \(self.hostBundleID)] armBroadcast: spawning extension \(self.extensionContext.bundleID)")
+        log.notice("[Session \(self.hostBundleID)] armBroadcast: spawning extension \(self.extensionContext.bundleID)")
         // simctl spawn blocks until the extension exits.
         launchTask = Task { [weak self] in await self?.launchExtension() }
     }
@@ -736,7 +736,7 @@ public actor GeistBroadcastSession {
             if current != lastMicAuth {
                 lastMicAuth = current
                 let bundle = hostBundleID
-                Log.notice("[Session \(bundle)] macOS mic auth changed → \(current)")
+                log.notice("[Session \(bundle)] macOS mic auth changed → \(current)")
                 if let hostFD {
                     let currentBroadcast = activeBroadcasts.first
                     send(.state(recording: currentBroadcast != nil,
@@ -759,7 +759,7 @@ public actor GeistBroadcastSession {
                 environment: try extensionLaunchEnv()
             )
         } catch {
-            Log.warn("Session: launchExtension failed: \(error)")
+            log.warn("Session: launchExtension failed: \(error)")
             if let pending = pendingBroadcast {
                 delegate?.session(self, broadcastFailedToStart: pending, error: error)
             }
@@ -887,7 +887,7 @@ private func logUnsupportedAudioFormatOnce(_ format: AVAudioFormat) {
     loggedUnsupportedAudioFormat = true
     loggedUnsupportedAudioFormatLock.unlock()
     guard !alreadyLogged else { return }
-    Log.warn("encodeAudio dropping buffers: unsupported common format \(format.commonFormat.rawValue) (sr=\(format.sampleRate) ch=\(format.channelCount))")
+    log.warn("encodeAudio dropping buffers: unsupported common format \(format.commonFormat.rawValue) (sr=\(format.sampleRate) ch=\(format.channelCount))")
 }
 
 final class SessionBroadcastSink: BroadcastSink {

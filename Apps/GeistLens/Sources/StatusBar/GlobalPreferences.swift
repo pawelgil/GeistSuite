@@ -1,6 +1,5 @@
 import Foundation
 import ServiceManagement
-import GeistCamera
 
 @MainActor
 final class GlobalPreferences {
@@ -43,7 +42,7 @@ final class GlobalPreferences {
                     }
                 }
             } catch {
-                Log.warn("launch-at-login toggle failed: \(error)")
+                log.warn("launch-at-login toggle failed: \(error)")
             }
         }
     }

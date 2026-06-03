@@ -44,7 +44,7 @@ final class SocketClient: Sendable, FrameTransport {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if (try? attemptConnect()) == true {
-                Log.notice("connected to shim at \(self.path)")
+                log.notice("connected to shim at \(self.path)")
                 startReadLoop()
                 startWriter()
                 return
@@ -102,7 +102,7 @@ final class SocketClient: Sendable, FrameTransport {
             if !readExact(fd: fd, into: &lengthBytes, count: 4) { break }
             let length: UInt32 = lengthBytes.readLE(at: 0)
             if length < 4 || length > 64 * 1024 * 1024 {
-                Log.warn("bad inbound length \(length); dropping")
+                log.warn("bad inbound length \(length); dropping")
                 break
             }
             var payload = Data(count: Int(length))
@@ -110,14 +110,14 @@ final class SocketClient: Sendable, FrameTransport {
 
             let typeRaw: UInt32 = payload.readLE(at: 0)
             guard let type = WireMessageType(rawValue: typeRaw) else {
-                Log.warn("unknown inbound message type \(typeRaw)")
+                log.warn("unknown inbound message type \(typeRaw)")
                 continue
             }
             let body = payload.subdata(in: 4..<payload.count)
             continuation.yield(InboundMessage(type: type, payload: body))
         }
         continuation.finish()
-        Log.notice("read loop ended for \(path)")
+        log.notice("read loop ended for \(path)")
     }
 
     private static func readExact(fd: Int32, into buf: inout Data, count: Int) -> Bool {

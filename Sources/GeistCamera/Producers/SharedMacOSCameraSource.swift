@@ -156,7 +156,7 @@ final class SharedDeviceSession: NSObject, AVCaptureVideoDataOutputSampleBufferD
     }
 
     @objc nonisolated private func handleInterrupted(_ note: Notification) {
-        Log.notice("AVCaptureSession interrupted")
+        log.notice("AVCaptureSession interrupted")
     }
 
     @objc nonisolated private func handleInterruptionEnded(_ note: Notification) {
@@ -170,7 +170,7 @@ final class SharedDeviceSession: NSObject, AVCaptureVideoDataOutputSampleBufferD
 
     @objc nonisolated private func handleRuntimeError(_ note: Notification) {
         let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error
-        Log.warn("AVCaptureSession runtime error: \(String(describing: err)) — restarting")
+        log.warn("AVCaptureSession runtime error: \(String(describing: err)) — restarting")
         Task { @CameraActor [weak self] in
             guard let self else { return }
             if hasAnySubscriber() {
@@ -232,7 +232,7 @@ final class SharedDeviceSession: NSObject, AVCaptureVideoDataOutputSampleBufferD
             removeMicInput()
             try addMicInput()
         } catch {
-            Log.warn("MacOSCamera: rebuilding mic input failed: \(error)")
+            log.warn("MacOSCamera: rebuilding mic input failed: \(error)")
         }
     }
 
@@ -272,7 +272,7 @@ final class SharedDeviceSession: NSObject, AVCaptureVideoDataOutputSampleBufferD
         output.setSampleBufferDelegate(self, queue: CameraActor.shared.serialQueue)
         audioInput = input
         audioOutput = output
-        Log.notice("MacOSCamera: mic input added '\(device.localizedName)' (uid=\(device.uniqueID))")
+        log.notice("MacOSCamera: mic input added '\(device.localizedName)' (uid=\(device.uniqueID))")
     }
 
     private func removeMicInput() {
@@ -466,7 +466,7 @@ private final class DefaultInputDeviceWatcher: @unchecked Sendable {
             nil
         )
         if status != noErr {
-            Log.warn("MacOSCamera: default-input listener install failed (\(status))")
+            log.warn("MacOSCamera: default-input listener install failed (\(status))")
         }
     }
 }

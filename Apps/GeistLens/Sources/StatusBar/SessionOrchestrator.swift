@@ -54,10 +54,10 @@ final class SessionOrchestrator {
     func handleSocketAppeared(_ entry: SocketWatcher.SocketEntry) {
         let key = Key(simulatorUDID: entry.simulatorUDID, bundleID: entry.bundleID)
         if sessions[key] != nil {
-            Log.notice("Orchestrator.socketAppeared: \(entry.bundleID) already has session — ignoring")
+            log.notice("Orchestrator.socketAppeared: \(entry.bundleID) already has session — ignoring")
             return
         }
-        Log.notice("Orchestrator.socketAppeared: starting session for \(entry.bundleID) udid=\(entry.simulatorUDID)")
+        log.notice("Orchestrator.socketAppeared: starting session for \(entry.bundleID) udid=\(entry.simulatorUDID)")
 
         let backEff = effectiveSource(simulatorUDID: entry.simulatorUDID, bundleID: entry.bundleID, side: .back)
         let frontEff = effectiveSource(simulatorUDID: entry.simulatorUDID, bundleID: entry.bundleID, side: .front)
@@ -81,7 +81,7 @@ final class SessionOrchestrator {
             do {
                 try await session.start(connectTimeout: 5)
             } catch {
-                Log.warn("session.start failed for \(entry.bundleID): \(error) — unlinking stale socket")
+                log.warn("session.start failed for \(entry.bundleID): \(error) — unlinking stale socket")
                 try? FileManager.default.removeItem(atPath: entry.path)
                 _ = self.sessions.removeValue(forKey: key)
             }
@@ -133,10 +133,10 @@ final class SessionOrchestrator {
     func handleSocketDisappeared(_ entry: SocketWatcher.SocketEntry) {
         let key = Key(simulatorUDID: entry.simulatorUDID, bundleID: entry.bundleID)
         guard let session = sessions.removeValue(forKey: key) else {
-            Log.notice("Orchestrator.socketDisappeared: \(entry.bundleID) — no live session")
+            log.notice("Orchestrator.socketDisappeared: \(entry.bundleID) — no live session")
             return
         }
-        Log.notice("Orchestrator.socketDisappeared: stopping session for \(entry.bundleID)")
+        log.notice("Orchestrator.socketDisappeared: stopping session for \(entry.bundleID)")
         Task { await session.stop() }
     }
 
@@ -179,7 +179,7 @@ final class SessionOrchestrator {
                                         front: frontEff.persistable,
                                         cameraAuthorized: permissions.cameraAuthorized,
                                         microphoneAuthorized: permissions.microphoneAuthorized)
-        Log.notice("Orchestrator.attachSources: \(bundleID) back=\(backEff.displayLabel) front=\(frontEff.displayLabel) route=\(route)")
+        log.notice("Orchestrator.attachSources: \(bundleID) back=\(backEff.displayLabel) front=\(frontEff.displayLabel) route=\(route)")
 
         let backWantsMic: Bool
         let frontWantsMic: Bool
@@ -248,7 +248,7 @@ extension SessionOrchestrator {
     @MainActor
     private func handleSessionDisconnect(sessionRef: ObjectIdentifier) {
         guard let key = sessions.first(where: { ObjectIdentifier($0.value) == sessionRef })?.key else { return }
-        Log.notice("Orchestrator.sessionDidDisconnect: \(key.bundleID) udid=\(key.simulatorUDID)")
+        log.notice("Orchestrator.sessionDidDisconnect: \(key.bundleID) udid=\(key.simulatorUDID)")
         sessions.removeValue(forKey: key)
         let path = "/tmp/geistcam/\(key.simulatorUDID)/\(key.bundleID).sock"
         try? FileManager.default.removeItem(atPath: path)

@@ -1,6 +1,5 @@
 import Darwin
 import Foundation
-import GeistCamera
 
 final class ControlServer: @unchecked Sendable {
     private let handler: ControlHandler
@@ -63,7 +62,7 @@ final class ControlServer: @unchecked Sendable {
         acceptSource = src
         src.resume()
 
-        Log.notice("ControlServer: listening at \(path)")
+        log.notice("ControlServer: listening at \(path)")
     }
 
     func stop() {
@@ -95,7 +94,7 @@ final class ControlServer: @unchecked Sendable {
                 let payload = try JSONEncoder().encode(response)
                 ControlSocketIO.writeLine(fd: fd, payload: payload)
             } catch {
-                Log.warn("ControlServer: request failed: \(error)")
+                log.warn("ControlServer: request failed: \(error)")
                 let err = ControlResponse.error(.init(message: "\(error)"))
                 if let payload = try? JSONEncoder().encode(err) {
                     ControlSocketIO.writeLine(fd: fd, payload: payload)

@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import GeistCamera
+import GeistKit
 
 protocol SocketScanning: Sendable {
     func scan() -> Set<SocketWatcher.SocketEntry>
@@ -42,7 +42,7 @@ final class SocketWatcher {
 
     func start() {
         let interval = pollInterval
-        Log.notice("SocketWatcher: starting (poll=\(interval)s)")
+        log.notice("SocketWatcher: starting (poll=\(interval)s)")
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: pollInterval)
         t.setEventHandler { [weak self] in self?.tick() }
@@ -51,13 +51,13 @@ final class SocketWatcher {
     }
 
     func stop() {
-        Log.notice("SocketWatcher: stopping")
+        log.notice("SocketWatcher: stopping")
         timer?.cancel()
         timer = nil
     }
 
     func pollNow() {
-        Log.notice("SocketWatcher: pollNow()")
+        log.notice("SocketWatcher: pollNow()")
         queue.async { [weak self] in self?.tick() }
     }
 
@@ -70,13 +70,13 @@ final class SocketWatcher {
         if tickCount % 60 == 0 {
             let count = tickCount
             let total = current.count
-            Log.info("SocketWatcher.heartbeat: tick=\(count) sockets=\(total)")
+            log.info("SocketWatcher.heartbeat: tick=\(count) sockets=\(total)")
         }
         if added.isEmpty && removed.isEmpty { return }
         let addedNames = added.map(\.bundleID).sorted()
         let removedNames = removed.map(\.bundleID).sorted()
         let total = current.count
-        Log.notice("SocketWatcher.tick: added=\(addedNames) removed=\(removedNames) totalNow=\(total)")
+        log.notice("SocketWatcher.tick: added=\(addedNames) removed=\(removedNames) totalNow=\(total)")
         DispatchQueue.main.async { [onChange] in onChange(added, removed) }
     }
 

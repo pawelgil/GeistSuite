@@ -12,10 +12,18 @@ enum IssueReport {
                                                  withIntermediateDirectories: true)
 
         try writeMetadata(into: dir)
-        copyShimLog(into: dir)
-        try writeAppLog(into: dir)
+        copySessionLogs(into: dir)
 
         return URL(fileURLWithPath: dir)
+    }
+
+    private static func copySessionLogs(into dir: String) {
+        for src in [LogPaths.daemonLog, LogPaths.shimLog] {
+            guard FileManager.default.fileExists(atPath: src) else { continue }
+            let dest = (dir as NSString)
+                .appendingPathComponent((src as NSString).lastPathComponent)
+            try? FileManager.default.copyItem(atPath: src, toPath: dest)
+        }
     }
 
     private static func writeMetadata(into dir: String) throws {
@@ -48,20 +56,6 @@ enum IssueReport {
         """
         try lines.write(toFile: (dir as NSString).appendingPathComponent("metadata.txt"),
                         atomically: true, encoding: .utf8)
-    }
-
-    private static func copyShimLog(into dir: String) {
-        let dest = (dir as NSString).appendingPathComponent("shim.log")
-        try? FileManager.default.copyItem(atPath: LogPaths.shimLog, toPath: dest)
-    }
-
-    private static func writeAppLog(into dir: String) throws {
-        let log = (try? runProcess("/usr/bin/log", [
-            "show", "--last", "30m", "--info",
-            "--predicate", "subsystem CONTAINS \"com.geistlens\"",
-        ])) ?? "(log show unavailable)"
-        try log.write(toFile: (dir as NSString).appendingPathComponent("app.log"),
-                      atomically: true, encoding: .utf8)
     }
 
     private static func runProcess(_ executable: String, _ args: [String]) throws -> String {

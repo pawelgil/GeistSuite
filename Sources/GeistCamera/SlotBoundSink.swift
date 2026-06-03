@@ -21,7 +21,7 @@ private func warnOncePerSlot(_ slot: UInt32, _ message: @autoclosure () -> Strin
     }
     if !alreadyWarned {
         let text = message()
-        Log.warn("slot \(slot): \(text)")
+        log.warn("slot \(slot): \(text)")
     }
 }
 
@@ -172,7 +172,7 @@ private func serializePixelBuffer(_ pb: CVPixelBuffer, format: OSType, w width: 
     case kCVPixelFormatType_32BGRA:
         return packBGRA(pb: pb, width: width, height: height)
     default:
-        Log.warn("unsupported pixel format \(fourcc(format)) — dropping frame")
+        log.warn("unsupported pixel format \(fourcc(format)) — dropping frame")
         return nil
     }
 }

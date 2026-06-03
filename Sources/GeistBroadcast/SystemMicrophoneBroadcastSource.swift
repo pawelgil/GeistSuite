@@ -62,7 +62,7 @@ final class SystemMicrophoneBroadcastSource: BroadcastSource, @unchecked Sendabl
             try Self.buildSession(into: &s, delegate: delegate, queue: queue)
         }
         installDefaultInputListener()
-        Log.notice("SystemMic session started")
+        log.notice("SystemMic session started")
     }
 
     func stop() {
@@ -73,7 +73,7 @@ final class SystemMicrophoneBroadcastSource: BroadcastSource, @unchecked Sendabl
             s.session = nil
             s.sink = nil
         }
-        Log.notice("SystemMic stop: buffers=\(snapshot.buffers) samples=\(snapshot.samples)")
+        log.notice("SystemMic stop: buffers=\(snapshot.buffers) samples=\(snapshot.samples)")
     }
 
     // MARK: - Session lifecycle
@@ -84,7 +84,7 @@ final class SystemMicrophoneBroadcastSource: BroadcastSource, @unchecked Sendabl
         guard let device = AVCaptureDevice.default(for: .audio) else {
             throw MicError.noMicrophoneAvailable
         }
-        Log.notice("SystemMic device='\(device.localizedName)' uid=\(device.uniqueID)")
+        log.notice("SystemMic device='\(device.localizedName)' uid=\(device.uniqueID)")
 
         let session = AVCaptureSession()
         session.beginConfiguration()
@@ -125,9 +125,9 @@ final class SystemMicrophoneBroadcastSource: BroadcastSource, @unchecked Sendabl
                 guard s.sink != nil else { return } // already stopped
                 do {
                     try Self.buildSession(into: &s, delegate: self.delegate, queue: self.queue)
-                    Log.notice("SystemMic rebuilt session for new default input")
+                    log.notice("SystemMic rebuilt session for new default input")
                 } catch {
-                    Log.warn("SystemMic rebuild on default-device change failed: \(error)")
+                    log.warn("SystemMic rebuild on default-device change failed: \(error)")
                 }
             }
         }
@@ -153,7 +153,7 @@ final class SystemMicrophoneBroadcastSource: BroadcastSource, @unchecked Sendabl
             if status == noErr {
                 s.listenerInstalled = true
             } else {
-                Log.warn("SystemMic: AudioObjectAddPropertyListener failed status=\(status)")
+                log.warn("SystemMic: AudioObjectAddPropertyListener failed status=\(status)")
             }
         }
     }
@@ -249,7 +249,7 @@ private final class AudioSinkDelegate: NSObject, AVCaptureAudioDataOutputSampleB
             guard s.sink != nil else { return nil }
             if !s.firstBufferLogged {
                 let bf = pcm.format
-                Log.notice("SystemMic first buffer: sr=\(bf.sampleRate) ch=\(bf.channelCount) frames=\(pcm.frameLength)")
+                log.notice("SystemMic first buffer: sr=\(bf.sampleRate) ch=\(bf.channelCount) frames=\(pcm.frameLength)")
                 s.firstBufferLogged = true
             }
             s.buffers &+= 1

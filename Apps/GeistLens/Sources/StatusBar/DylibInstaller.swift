@@ -18,7 +18,7 @@ enum DylibInstaller {
         }
         try? FileManager.default.removeItem(atPath: installPath)
         try FileManager.default.copyItem(atPath: bundled, toPath: installPath)
-        Log.notice("DylibInstaller: installed \(bundledHash.prefix(12))… → \(installPath)")
+        log.notice("DylibInstaller: installed \(bundledHash.prefix(12))… → \(installPath)")
         return installPath
     }
 

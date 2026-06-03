@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import GeistCamera
 
 struct InstalledApp {
     let bundleID: String
@@ -20,7 +19,7 @@ enum AppEnumerator {
         do {
             try process.run()
         } catch {
-            Log.warn("simctl listapps failed: \(error)")
+            log.warn("simctl listapps failed: \(error)")
             return []
         }
         process.waitUntilExit()

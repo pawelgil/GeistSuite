@@ -1,5 +1,4 @@
 import Foundation
-import GeistCamera
 
 enum SimulatorWatcher {
     static func queryBootedSimulators() -> Set<String> {
@@ -16,13 +15,13 @@ enum SimulatorWatcher {
         do {
             try process.run()
         } catch {
-            Log.warn("simctl list failed to launch: \(error)")
+            log.warn("simctl list failed to launch: \(error)")
             return []
         }
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let json = try? JSONDecoder().decode(SimctlListOutput.self, from: data) else {
-            Log.warn("simctl list returned unexpected JSON")
+            log.warn("simctl list returned unexpected JSON")
             return []
         }
         var devices: [BootedDevice] = []

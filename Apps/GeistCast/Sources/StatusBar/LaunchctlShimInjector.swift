@@ -1,5 +1,5 @@
 import Foundation
-import GeistBroadcast
+import GeistKit
 
 struct LaunchctlShimInjector: Sendable {
     private let process: any ProcessRunning
@@ -9,7 +9,7 @@ struct LaunchctlShimInjector: Sendable {
     }
 
     func injectDylib(at path: String, intoSimulator udid: String) async throws {
-        Log.notice("LaunchctlShimInjector.inject: udid=\(udid) dylib=\(path)")
+        log.notice("LaunchctlShimInjector.inject: udid=\(udid) dylib=\(path)")
         let existing = (try? await getenv(simulator: udid)) ?? ""
         let merged = Self.appending(path, to: existing)
         _ = try await process.run(
@@ -31,7 +31,7 @@ struct LaunchctlShimInjector: Sendable {
     }
 
     func uninjectDylib(at path: String, fromSimulator udid: String) async throws {
-        Log.notice("LaunchctlShimInjector.uninject: udid=\(udid) dylib=\(path)")
+        log.notice("LaunchctlShimInjector.uninject: udid=\(udid) dylib=\(path)")
         let existing = (try? await getenv(simulator: udid)) ?? ""
         let remaining = Self.removing(path, from: existing)
         if remaining.isEmpty {

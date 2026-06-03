@@ -63,7 +63,7 @@ final class FrameEmitter: @unchecked Sendable {
         let pool = Self.createPool(width: surface.width, height: surface.height)
         surfaceState = Mutex(SurfaceState(surface: surface, pool: pool))
         if pool == nil {
-            Log.warn("FrameEmitter: failed to create pixel buffer pool for \(surface.width)x\(surface.height), falling back to direct IOSurface wrap")
+            log.warn("FrameEmitter: failed to create pixel buffer pool for \(surface.width)x\(surface.height), falling back to direct IOSurface wrap")
         }
     }
 
@@ -138,7 +138,7 @@ final class FrameEmitter: @unchecked Sendable {
             deliveryQueue.async { [weak self] in self?.drainPending() }
         }
         let elapsedMs = Double(machToNanoseconds(clock() - entryClock)) / 1_000_000
-        Log.notice("FrameEmitter: IOSurface replaced (\(oldSize.0)x\(oldSize.1) → \(newSurface.width)x\(newSurface.height)) elapsed=\(String(format: "%.1f", elapsedMs))ms poolRecreated=\(poolRecreated)")
+        log.notice("FrameEmitter: IOSurface replaced (\(oldSize.0)x\(oldSize.1) → \(newSurface.width)x\(newSurface.height)) elapsed=\(String(format: "%.1f", elapsedMs))ms poolRecreated=\(poolRecreated)")
     }
 
     func stop() {
@@ -150,7 +150,7 @@ final class FrameEmitter: @unchecked Sendable {
             return previous
         }
         if snapshot.delivered > 0 || snapshot.coalesced > 0 {
-            Log.info("FrameEmitter stats: delivered=\(snapshot.delivered) coalesced=\(snapshot.coalesced)")
+            log.info("FrameEmitter stats: delivered=\(snapshot.delivered) coalesced=\(snapshot.coalesced)")
         }
     }
 
@@ -240,7 +240,7 @@ final class FrameEmitter: @unchecked Sendable {
         let srcBPR = IOSurfaceGetBytesPerRow(surfaceRef)
         let height = IOSurfaceGetHeight(surfaceRef)
         guard let dst = CVPixelBufferGetBaseAddress(destination) else {
-            Log.warn("FrameEmitter: null destination base address during frame copy")
+            log.warn("FrameEmitter: null destination base address during frame copy")
             return false
         }
         let dstBPR = CVPixelBufferGetBytesPerRow(destination)

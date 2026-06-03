@@ -67,7 +67,7 @@ public final class StillImageMediaSource: MediaSource, @unchecked Sendable {
     public func reformat(to target: VideoSlotFormat) {
         guard let pb = try? Self.renderImage(url: url, targetW: target.width,
                                               targetH: target.height, fitMode: fitMode) else {
-            Log.warn("StillImageMediaSource: re-render failed for \(target.width)x\(target.height)")
+            log.warn("StillImageMediaSource: re-render failed for \(target.width)x\(target.height)")
             return
         }
         buffer.mutex.withLock { $0 = UncheckedBuffer(value: pb) }

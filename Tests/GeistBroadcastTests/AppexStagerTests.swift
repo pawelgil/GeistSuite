@@ -1,6 +1,7 @@
 import Foundation
 import Synchronization
 import Testing
+import GeistKit
 @testable import GeistBroadcast
 
 @Suite("AppexStager")

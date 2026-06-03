@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Darwin
 import GeistCamera
+import GeistKit
 
 @main
 @MainActor
@@ -29,16 +30,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Log.notice("App: applicationDidFinishLaunching pid=\(getpid())")
+        LogPaths.ensureLogsDir()
+        LogPaths.truncateSessionLogs()
+        log.notice("App: applicationDidFinishLaunching pid=\(getpid())")
         setupStatusItem()
-        prepareShimLog()
         requestEagerPermissions()
         MenuStateCache.shared.startPolling(interval: 10)
         do {
             dylibPath = try DylibInstaller.installIfNeeded()
             startSimulatorWatcher()
         } catch {
-            Log.error("DylibInstaller failed: \(error). Auto-injection disabled.")
+            log.error("DylibInstaller failed: \(error). Auto-injection disabled.")
         }
         startSocketWatcher()
         startControlServer()
@@ -48,20 +50,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func registerSleepWakeObservers() {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
-            Log.notice("App: NSWorkspace.willSleep")
+            log.notice("App: NSWorkspace.willSleep")
         }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             let booted = SimulatorWatcher.queryBootedSimulators().sorted()
             let injected = self?.injectedSimulators.sorted() ?? []
-            Log.notice("App: NSWorkspace.didWake — booted=\(booted) injected=\(injected)")
+            log.notice("App: NSWorkspace.didWake — booted=\(booted) injected=\(injected)")
         }
         nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { _ in
-            Log.notice("App: NSWorkspace.screensDidSleep")
+            log.notice("App: NSWorkspace.screensDidSleep")
         }
         nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { _ in
-            Log.notice("App: NSWorkspace.screensDidWake")
+            log.notice("App: NSWorkspace.screensDidWake")
         }
-        Log.notice("App: registered sleep/wake observers")
+        log.notice("App: registered sleep/wake observers")
     }
 
     private func requestEagerPermissions() {
@@ -76,15 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func prepareShimLog() {
-        try? FileManager.default.createDirectory(atPath: LogPaths.logsDir,
-                                                  withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: LogPaths.shimLog, contents: nil)
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         let injectedList = injectedSimulators.sorted()
-        Log.notice("App: applicationWillTerminate injected=\(injectedList)")
+        log.notice("App: applicationWillTerminate injected=\(injectedList)")
         controlServer?.stop()
         // launchd_sim keeps DYLD_INSERT_LIBRARIES across our lifetime; leaving
         // it set breaks every future camera app launch in that sim.
@@ -105,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try server.start()
             controlServer = server
         } catch {
-            Log.error("ControlServer failed to start: \(error). CLI control disabled.")
+            log.error("ControlServer failed to start: \(error). CLI control disabled.")
         }
     }
 
@@ -169,16 +165,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if watcher.start() {
             simulatorWatcher = watcher
-            Log.notice("EventDrivenSimulatorWatcher: observing CoreSimulator notifications")
+            log.notice("EventDrivenSimulatorWatcher: observing CoreSimulator notifications")
         } else {
-            Log.error("EventDrivenSimulatorWatcher: CoreSimulator unavailable — auto-injection disabled")
+            log.error("EventDrivenSimulatorWatcher: CoreSimulator unavailable — auto-injection disabled")
         }
     }
 
     private func handleSimulatorChange(added: Set<String>, removed: Set<String>, dylibPath: String) {
         let addedList = added.sorted()
         let removedList = removed.sorted()
-        Log.notice("App.handleSimulatorChange: added=\(addedList) removed=\(removedList)")
+        log.notice("App.handleSimulatorChange: added=\(addedList) removed=\(removedList)")
         for udid in added {
             shimInjector.injectDylib(dylibPath, intoSimulator: udid)
             injectedSimulators.insert(udid)
@@ -194,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             let addedNames = added.map(\.bundleID).sorted()
             let removedNames = removed.map(\.bundleID).sorted()
-            Log.notice("App.handleSocketChange: added=\(addedNames) removed=\(removedNames)")
+            log.notice("App.handleSocketChange: added=\(addedNames) removed=\(removedNames)")
             // Removals first: shim relaunch shows up as same-path/new-inode,
             // so old removed + new added share the orchestrator key. Adding
             // before clearing would no-op.

@@ -92,7 +92,7 @@ private final class MicrophoneCore {
         do {
             try rebuildSession()
         } catch {
-            Log.warn("MacOSMicrophone: rebuild on default-device change failed: \(error)")
+            log.warn("MacOSMicrophone: rebuild on default-device change failed: \(error)")
         }
     }
 
@@ -141,7 +141,7 @@ private final class MicrophoneCore {
         session?.stopRunning()
         session = newSession
         if running { newSession.startRunning() }
-        Log.notice("MacOSMicrophone: bound to '\(device.localizedName)' (uid=\(device.uniqueID))")
+        log.notice("MacOSMicrophone: bound to '\(device.localizedName)' (uid=\(device.uniqueID))")
     }
 }
 
@@ -197,7 +197,7 @@ private final class DefaultInputDeviceObserver: @unchecked Sendable {
             nil
         )
         if status != noErr {
-            Log.warn("MacOSMicrophone: AudioObjectAddPropertyListener failed (\(status))")
+            log.warn("MacOSMicrophone: AudioObjectAddPropertyListener failed (\(status))")
         }
     }
 }

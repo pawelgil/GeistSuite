@@ -69,7 +69,7 @@ public final class MacCamMicMediaSource: MediaSource, @unchecked Sendable {
                     try shared.addAudioSubscriber(audio, id: aid)
                 }
             } catch {
-                Log.warn("MacCamMicMediaSource start failed: \(error)")
+                log.warn("MacCamMicMediaSource start failed: \(error)")
             }
         }
     }
@@ -87,7 +87,7 @@ public final class MacCamMicMediaSource: MediaSource, @unchecked Sendable {
                 if let vid { shared.remove(id: vid) }
                 if let aid { shared.removeAudioSubscriber(id: aid) }
             } catch {
-                Log.warn("MacCamMicMediaSource stop: pool lookup failed: \(error)")
+                log.warn("MacCamMicMediaSource stop: pool lookup failed: \(error)")
             }
         }
     }
