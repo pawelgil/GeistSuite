@@ -23,7 +23,6 @@ let package = Package(
 
         .target(
             name: "GeistCameraShimCore",
-            dependencies: ["SharedShimCore"],
             path: "Sources/GeistCameraShimCore",
             publicHeadersPath: "include"
         ),

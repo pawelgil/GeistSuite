@@ -11,45 +11,44 @@ struct BuildShim: BuildToolPlugin {
         let sourcesRoot = packageRoot.appending(path: "Sources")
         let outputDir = context.pluginWorkDirectoryURL
 
-        let sharedShimDir = sourcesRoot.appending(path: "SharedShimCore")
-        let sharedCompile = try Self.gather(under: sharedShimDir, extensions: ["m", "c"])
-        let sharedInputs = try Self.gather(under: sharedShimDir, extensions: Self.trackedExtensions)
-
         switch target.name {
         case "GeistCamera":
             let cameraShimCoreDir = sourcesRoot.appending(path: "GeistCameraShimCore")
-            let cameraShimCoreCompile = try Self.gather(under: cameraShimCoreDir, extensions: ["m", "c"])
-            let cameraShimCoreInputs = try Self.gather(under: cameraShimCoreDir, extensions: Self.trackedExtensions)
+            let cameraCompile = try Self.gather(under: cameraShimCoreDir, extensions: ["m", "c"])
+            let cameraInputs = try Self.gather(under: cameraShimCoreDir, extensions: Self.trackedExtensions)
             return [
                 try Self.buildCommand(
                     name: "GeistCamShim",
                     modeDir: sourcesRoot.appending(path: "GeistCamShim"),
                     outputDir: outputDir,
-                    headerSearchDirs: [sharedShimDir, cameraShimCoreDir],
-                    sharedCompile: sharedCompile + cameraShimCoreCompile,
-                    sharedInputs: sharedInputs + cameraShimCoreInputs
+                    headerSearchDirs: [cameraShimCoreDir],
+                    coreCompile: cameraCompile,
+                    coreInputs: cameraInputs
                 ),
             ]
         case "GeistBroadcast":
+            let sharedShimDir = sourcesRoot.appending(path: "SharedShimCore")
+            let sharedCompile = try Self.gather(under: sharedShimDir, extensions: ["m", "c"])
+            let sharedInputs = try Self.gather(under: sharedShimDir, extensions: Self.trackedExtensions)
             let broadcastShimCoreDir = sourcesRoot.appending(path: "GeistBroadcastShimCore")
-            let broadcastShimCoreCompile = try Self.gather(under: broadcastShimCoreDir, extensions: ["m", "c"])
-            let broadcastShimCoreInputs = try Self.gather(under: broadcastShimCoreDir, extensions: Self.trackedExtensions)
+            let broadcastCompile = try Self.gather(under: broadcastShimCoreDir, extensions: ["m", "c"])
+            let broadcastInputs = try Self.gather(under: broadcastShimCoreDir, extensions: Self.trackedExtensions)
             return [
                 try Self.buildCommand(
                     name: "GeistBroadcastAppShim",
                     modeDir: sourcesRoot.appending(path: "GeistBroadcastAppShim"),
                     outputDir: outputDir,
                     headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
-                    sharedCompile: sharedCompile + broadcastShimCoreCompile,
-                    sharedInputs: sharedInputs + broadcastShimCoreInputs
+                    coreCompile: sharedCompile + broadcastCompile,
+                    coreInputs: sharedInputs + broadcastInputs
                 ),
                 try Self.buildCommand(
                     name: "GeistBroadcastExtensionShim",
                     modeDir: sourcesRoot.appending(path: "GeistBroadcastExtensionShim"),
                     outputDir: outputDir,
                     headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
-                    sharedCompile: sharedCompile + broadcastShimCoreCompile,
-                    sharedInputs: sharedInputs + broadcastShimCoreInputs
+                    coreCompile: sharedCompile + broadcastCompile,
+                    coreInputs: sharedInputs + broadcastInputs
                 ),
             ]
         default:
@@ -61,8 +60,8 @@ struct BuildShim: BuildToolPlugin {
                                       modeDir: URL,
                                       outputDir: URL,
                                       headerSearchDirs: [URL],
-                                      sharedCompile: [URL],
-                                      sharedInputs: [URL]) throws -> Command {
+                                      coreCompile: [URL],
+                                      coreInputs: [URL]) throws -> Command {
         let modeCompile = try gather(under: modeDir, extensions: ["m"])
         let modeInputs = try gather(under: modeDir, extensions: trackedExtensions)
         let dylib = outputDir.appending(path: "\(name).dylib")
@@ -88,13 +87,13 @@ struct BuildShim: BuildToolPlugin {
         args.append(contentsOf: ["-I", modeDir.path()])
         args.append(contentsOf: ["-install_name", dylib.path()])
         args.append(contentsOf: ["-o", dylib.path()])
-        args.append(contentsOf: (sharedCompile + modeCompile).map { $0.path() })
+        args.append(contentsOf: (coreCompile + modeCompile).map { $0.path() })
 
         return .buildCommand(
             displayName: "Compile \(name).dylib for iOS Simulator",
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: args,
-            inputFiles: sharedInputs + modeInputs,
+            inputFiles: coreInputs + modeInputs,
             outputFiles: [dylib]
         )
     }
