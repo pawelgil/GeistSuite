@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import GeistCamera
 
 final class ControlServer: @unchecked Sendable {
     private let handler: ControlHandler

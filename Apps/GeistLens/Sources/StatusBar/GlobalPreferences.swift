@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import GeistCamera
 
 @MainActor
 final class GlobalPreferences {

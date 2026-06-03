@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import GeistCamera
 
 enum CLIInstaller {
     static let candidateDirs: [String] = [

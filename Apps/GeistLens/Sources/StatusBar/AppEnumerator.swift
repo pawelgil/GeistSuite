@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import GeistCamera
 
 struct InstalledApp {
     let bundleID: String

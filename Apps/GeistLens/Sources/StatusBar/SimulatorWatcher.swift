@@ -1,4 +1,5 @@
 import Foundation
+import GeistCamera
 
 enum SimulatorWatcher {
     static func queryBootedSimulators() -> Set<String> {

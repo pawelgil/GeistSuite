@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Foundation
+import GeistCamera
 
 @MainActor
 final class MenuBuilder {

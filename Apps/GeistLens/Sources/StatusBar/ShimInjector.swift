@@ -1,4 +1,5 @@
 import Foundation
+import GeistCamera
 
 protocol SimctlRunning: Sendable {
     func runSimctl(udid: String, args: [String]) -> Bool
