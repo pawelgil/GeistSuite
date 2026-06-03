@@ -1,0 +1,23 @@
+# Xcode
+*.xcodeproj/
+!*.xcodeproj/xcshareddata/
+xcuserdata/
+*.xcuserstate
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Build outputs
+build/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Tooling
+*.dSYM/
+
+# Test runner profiling output
+default.profraw
