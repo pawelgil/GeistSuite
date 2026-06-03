@@ -7,6 +7,7 @@ final class GlobalPreferences {
 
     private let defaults: UserDefaults
     private let defaultSourceKey = "geistlens.defaultSource"
+    private let defaultMicSourceKey = "geistlens.defaultMicSource"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -22,6 +23,20 @@ final class GlobalPreferences {
                 defaults.set(data, forKey: defaultSourceKey)
             } else {
                 defaults.removeObject(forKey: defaultSourceKey)
+            }
+        }
+    }
+
+    var defaultMicSource: PersistableMicSource {
+        get {
+            guard let data = defaults.data(forKey: defaultMicSourceKey),
+                  let decoded = try? JSONDecoder().decode(PersistableMicSource.self, from: data)
+            else { return .systemMicrophone }
+            return decoded
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: defaultMicSourceKey)
             }
         }
     }

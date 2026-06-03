@@ -10,11 +10,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var simulatorWatcher: SimulatorWatcher?
     private var socketWatcher: SocketWatcher?
     private let orchestrator = SessionOrchestrator()
+    private lazy var broadcastCoordinator = BroadcastCoordinator(
+        listing: ProcessBootedSimulatorsListing(process: LiveProcess())
+    )
     private lazy var menuBuilder = MenuBuilder(orchestrator: orchestrator)
     private var installedShims: DylibInstaller.InstalledShims?
     private var injectedSimulators: Set<String> = []
     private var controlServer: ControlServer?
     private let shimInjector = ShimInjector()
+    private var cameraStreaming = false
+    private var broadcastStreaming = false
 
     static func main() {
         // Default SIGPIPE handler kills us; we want EPIPE on dead-shim writes.
@@ -41,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         startSocketWatcher()
         startControlServer()
+        broadcastCoordinator.start()
         registerSleepWakeObservers()
     }
 
@@ -92,6 +98,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 shimInjector.uninjectDylib(cameraDylib, fromSimulator: udid)
             }
         }
+        if let broadcastDylib = installedShims?.broadcastAppShimPath {
+            for udid in injectedSimulators {
+                shimInjector.uninjectDylib(broadcastDylib, fromSimulator: udid)
+            }
+        }
+        let coordinator = broadcastCoordinator
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            await coordinator.stop()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 2)
     }
 
     private func startControlServer() {
@@ -125,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             installStreamingDot(on: button)
         }
         orchestrator.streamingDelegate = self
+        broadcastCoordinator.streamingDelegate = self
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
@@ -174,10 +193,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Log.notice("App.handleSimulatorChange: added=\(addedList) removed=\(removedList)")
         for udid in added {
             shimInjector.injectDylib(dylibPath, intoSimulator: udid)
+            if let broadcastDylib = installedShims?.broadcastAppShimPath {
+                shimInjector.injectDylib(broadcastDylib, intoSimulator: udid)
+            }
             injectedSimulators.insert(udid)
         }
         for udid in removed {
             injectedSimulators.remove(udid)
+            Task { await self.broadcastCoordinator.removeSessions(for: udid) }
         }
         Task { await MenuStateCache.shared.refresh() }
     }
@@ -201,6 +224,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 extension AppDelegate: StreamingStateDelegate {
     func orchestrator(_ orchestrator: SessionOrchestrator, isStreamingChanged isStreaming: Bool) {
-        streamingDot?.isHidden = !isStreaming
+        cameraStreaming = isStreaming
+        refreshStreamingDot()
+    }
+
+    func broadcastCoordinator(_ coordinator: BroadcastCoordinator, isStreamingChanged isStreaming: Bool) {
+        broadcastStreaming = isStreaming
+        refreshStreamingDot()
+    }
+
+    private func refreshStreamingDot() {
+        streamingDot?.isHidden = !(cameraStreaming || broadcastStreaming)
     }
 }

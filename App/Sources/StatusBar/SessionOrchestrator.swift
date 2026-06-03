@@ -6,6 +6,7 @@ import Geist
 @MainActor
 protocol StreamingStateDelegate: AnyObject {
     func orchestrator(_ orchestrator: SessionOrchestrator, isStreamingChanged isStreaming: Bool)
+    func broadcastCoordinator(_ coordinator: BroadcastCoordinator, isStreamingChanged isStreaming: Bool)
 }
 
 @MainActor
