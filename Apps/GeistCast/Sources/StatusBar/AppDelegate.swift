@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var statusItem: NSStatusItem?
     private var streamingDot: CAShapeLayer?
     private let listing: any BootedSimulatorsListing
-    private let simulatorWatcher: SimulatorWatcher
+    private var simulatorWatcher: EventDrivenSimulatorWatcher?
     private let injector: LaunchctlShimInjector
     private let preferences = PreferencesStore()
     private let globals = GlobalPreferences()
@@ -49,7 +49,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var inFlightKeys: Set<SessionKey> = []
     private var injectedSimulators: Set<String> = []
     private var pollTask: Task<Void, Never>?
-    private var watcherTask: Task<Void, Never>?
 
     private struct SessionKey: Hashable {
         let simulator: String
@@ -60,7 +59,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let process = LiveProcess()
         let listing = ProcessBootedSimulatorsListing(process: process)
         self.listing = listing
-        self.simulatorWatcher = SimulatorWatcher(listing: listing)
         self.injector = LaunchctlShimInjector(process: process)
         self.dylibPath = (try? DylibInstaller.installIfNeeded())
         if dylibPath == nil {
@@ -102,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let sessionCount = sessions.count
         let injectedCount = injectedSimulators.count
         Log.notice("applicationWillTerminate: stopping \(sessionCount) sessions, uninjecting from \(injectedCount) simulators")
-        watcherTask?.cancel()
+        simulatorWatcher?.stop()
         pollTask?.cancel()
         let sessionList = Array(sessions.values)
         let injectedList = Array(injectedSimulators)
@@ -233,22 +231,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func startSimulatorWatching() {
-        watcherTask = Task { [weak self, simulatorWatcher] in
-            var previous: Set<BootedSimulator> = []
-            for await snapshot in simulatorWatcher.snapshots() {
-                guard let self else { return }
-                let added = snapshot.subtracting(previous)
-                let removedUDIDs = previous.subtracting(snapshot).map(\.udid)
-                previous = snapshot
-                for sim in added {
-                    Log.notice("simulator booted: \(sim.name) (\(sim.udid))")
-                    await self.injectIfNeeded(simulator: sim.udid)
-                }
-                for udid in removedUDIDs {
-                    Log.notice("simulator shutdown: \(udid)")
-                    await self.removeSessions(for: udid)
-                }
+        let watcher = EventDrivenSimulatorWatcher(source: CoreSimulatorEventSource()) { [weak self] added, removed in
+            MainActor.assumeIsolated {
+                self?.handleSimulatorChange(added: added, removed: removed)
             }
+        }
+        if watcher.start() {
+            simulatorWatcher = watcher
+            Log.notice("EventDrivenSimulatorWatcher: observing CoreSimulator notifications")
+        } else {
+            Log.error("EventDrivenSimulatorWatcher: CoreSimulator unavailable — auto-injection disabled")
+        }
+    }
+
+    private func handleSimulatorChange(added: Set<String>, removed: Set<String>) {
+        for udid in added {
+            Log.notice("simulator booted: \(udid)")
+            Task { await self.injectIfNeeded(simulator: udid) }
+        }
+        for udid in removed {
+            Log.notice("simulator shutdown: \(udid)")
+            Task { await self.removeSessions(for: udid) }
         }
     }
 

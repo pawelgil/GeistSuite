@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import GeistCamera
 
 protocol SocketScanning: Sendable {
     func scan() -> Set<SocketWatcher.SocketEntry>

@@ -1,13 +1,14 @@
 import AppKit
 import AVFoundation
 import Darwin
+import GeistCamera
 
 @main
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var streamingDot: CAShapeLayer?
-    private var simulatorWatcher: SimulatorWatcher?
+    private var simulatorWatcher: EventDrivenSimulatorWatcher?
     private var socketWatcher: SocketWatcher?
     private let orchestrator = SessionOrchestrator()
     private lazy var menuBuilder = MenuBuilder(orchestrator: orchestrator)
@@ -161,11 +162,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func startSimulatorWatcher() {
         guard let dylibPath else { return }
-        let watcher = SimulatorWatcher { [weak self] added, removed in
-            self?.handleSimulatorChange(added: added, removed: removed, dylibPath: dylibPath)
+        let watcher = EventDrivenSimulatorWatcher(source: CoreSimulatorEventSource()) { [weak self] added, removed in
+            MainActor.assumeIsolated {
+                self?.handleSimulatorChange(added: added, removed: removed, dylibPath: dylibPath)
+            }
         }
-        watcher.start()
-        simulatorWatcher = watcher
+        if watcher.start() {
+            simulatorWatcher = watcher
+            Log.notice("EventDrivenSimulatorWatcher: observing CoreSimulator notifications")
+        } else {
+            Log.error("EventDrivenSimulatorWatcher: CoreSimulator unavailable — auto-injection disabled")
+        }
     }
 
     private func handleSimulatorChange(added: Set<String>, removed: Set<String>, dylibPath: String) {

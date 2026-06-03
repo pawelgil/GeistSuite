@@ -38,7 +38,13 @@ let package = Package(
         .target(
             name: "GeistKit",
             dependencies: ["CoreSimulatorPrivate"],
-            path: "Sources/GeistKit"
+            path: "Sources/GeistKit",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
+                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
+                ]),
+            ]
         ),
 
         .target(
