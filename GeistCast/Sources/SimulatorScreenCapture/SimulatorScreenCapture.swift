@@ -1,5 +1,6 @@
 internal import CoreSimulatorPrivate
 import Foundation
+import GeistKit
 import IOSurface
 import Synchronization
 
@@ -17,11 +18,15 @@ public final class SimulatorScreenCapture: @unchecked Sendable {
 
     /// `setPath` is the CoreSimulator device set (e.g. a noggenfogger
     /// session sandbox); `nil` uses the Xcode default set.
-    public init(udid: UUID, setPath: String? = nil) throws {
+    public init(udid: UUID,
+                setPath: String? = nil,
+                developerDirResolver: any DeveloperDirResolving = LiveDeveloperDirResolver()) throws {
         guard NSClassFromString("SimServiceContext") != nil else {
             throw SimulatorScreenError.frameworkUnavailable
         }
-        let developerDir = try Self.resolveDeveloperDir()
+        guard let developerDir = developerDirResolver.resolve() else {
+            throw SimulatorScreenError.frameworkUnavailable
+        }
         let context: SimServiceContext
         do {
             context = try SimServiceContext(forDeveloperDir: developerDir)
@@ -78,28 +83,5 @@ public final class SimulatorScreenCapture: @unchecked Sendable {
 
     deinit {
         stop()
-    }
-
-    private static func resolveDeveloperDir() throws -> String {
-        if let envDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !envDir.isEmpty {
-            return envDir
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
-        process.arguments = ["-p"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw SimulatorScreenError.frameworkUnavailable
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let out = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !out.isEmpty
-        else { throw SimulatorScreenError.frameworkUnavailable }
-        return out
     }
 }

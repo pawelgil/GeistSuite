@@ -5,14 +5,17 @@ public final class CoreSimulatorEventSource: SimulatorEventSource, @unchecked Se
     private static let bootedState: UInt64 = 3
 
     private let queue = DispatchQueue(label: "com.geist.coresimulator.events")
+    private let developerDirResolver: any DeveloperDirResolving
     private var deviceSet: SimDeviceSet?
     private var token: UInt64 = 0
 
-    public init() {}
+    public init(developerDirResolver: any DeveloperDirResolving = LiveDeveloperDirResolver()) {
+        self.developerDirResolver = developerDirResolver
+    }
 
     public func startObserving(onPoke: @escaping () -> Void) -> Bool {
         guard NSClassFromString("SimServiceContext") != nil,
-              let developerDir = Self.developerDir(),
+              let developerDir = developerDirResolver.resolve(),
               let context = try? SimServiceContext(forDeveloperDir: developerDir),
               let set = try? context.defaultDeviceSet() else {
             return false
@@ -41,23 +44,5 @@ public final class CoreSimulatorEventSource: SimulatorEventSource, @unchecked Se
             token = 0
             deviceSet = nil
         }
-    }
-
-    private static func developerDir() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
-        process.arguments = ["-p"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.isEmpty ? nil : path
     }
 }

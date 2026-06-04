@@ -26,9 +26,12 @@ enum ExtensionDiscovery {
         simulator: UUID,
         hostBundleID: String,
         extensionBundleID: String?,
-        simctlSetPath: String?
+        simctlSetPath: String?,
+        deviceResolver: SimDeviceResolver = SimDeviceResolver()
     ) async throws -> (extensionBundleID: String, appexPath: String) {
-        let installedApps = try installedApps(simulator: simulator, simctlSetPath: simctlSetPath)
+        let installedApps = try installedApps(simulator: simulator,
+                                              simctlSetPath: simctlSetPath,
+                                              deviceResolver: deviceResolver)
         guard let entry = installedApps[hostBundleID],
               let appPath = entry["Path"] as? String else {
             throw ExtensionDiscoveryError.appNotInstalled(bundleID: hostBundleID)
@@ -51,9 +54,12 @@ enum ExtensionDiscovery {
 
     static func broadcastCapableApps(
         simulator: UUID,
-        simctlSetPath: String?
+        simctlSetPath: String?,
+        deviceResolver: SimDeviceResolver = SimDeviceResolver()
     ) async throws -> [BroadcastApp] {
-        let raw = try installedApps(simulator: simulator, simctlSetPath: simctlSetPath)
+        let raw = try installedApps(simulator: simulator,
+                                    simctlSetPath: simctlSetPath,
+                                    deviceResolver: deviceResolver)
         var apps: [BroadcastApp] = []
         for (bundleID, info) in raw {
             guard let appPath = info["Path"] as? String else { continue }
@@ -77,9 +83,10 @@ enum ExtensionDiscovery {
 
     private static func installedApps(
         simulator: UUID,
-        simctlSetPath: String?
+        simctlSetPath: String?,
+        deviceResolver: SimDeviceResolver
     ) throws -> [String: [String: Any]] {
-        let device = try SimDeviceResolver.resolve(udid: simulator, simctlSetPath: simctlSetPath)
+        let device = try deviceResolver.resolve(udid: simulator, simctlSetPath: simctlSetPath)
         let raw: Any
         do {
             raw = try device.installedApps()

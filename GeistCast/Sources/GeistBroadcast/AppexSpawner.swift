@@ -25,8 +25,11 @@ final class AppexSpawner: AppexSpawning, Sendable {
     }
 
     private let trackedPIDs = Mutex<[String: pid_t]>([:])
+    private let deviceResolver: SimDeviceResolver
 
-    init() {}
+    init(deviceResolver: SimDeviceResolver = SimDeviceResolver()) {
+        self.deviceResolver = deviceResolver
+    }
 
     func spawn(
         stagedBinary: String,
@@ -38,7 +41,7 @@ final class AppexSpawner: AppexSpawning, Sendable {
         guard let udid = UUID(uuidString: simulatorUDID) else {
             throw SpawnError.spawnFailed(reason: "invalid UDID '\(simulatorUDID)'")
         }
-        let device = try SimDeviceResolver.resolve(udid: udid, simctlSetPath: simctlSetPath)
+        let device = try deviceResolver.resolve(udid: udid, simctlSetPath: simctlSetPath)
         let options: [String: Any] = [
             "arguments": [stagedBinary],
             "environment": environment,
