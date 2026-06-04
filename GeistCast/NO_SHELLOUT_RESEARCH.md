@@ -2,8 +2,8 @@
 
 Research notes for converting GeistCast's broadcast machinery from subprocess shell-outs (`simctl`, `codesign`, `lipo`, `segedit`, `pkill`) to a fully in-process implementation talking to **CoreSimulator directly**.
 
-**Status:** research / evaluation. No code changed yet.
-**Last updated:** 2026-06-03.
+**Status:** SHIPPED. The refactor landed on 2026-06-04 in GeistSuite. `ExtensionDiscovery`, `AppexStager`, and `AppexSpawner` are now CoreSimulator-direct + Security-SPI-direct. The `simctl`/`codesign`/`lipo`/`segedit`/`pkill` shellouts no longer exist in `GeistCast/Sources/GeistBroadcast/`. The public API (`GeistBroadcastSession.init`, `broadcastCapableApps`, the delegate) is unchanged. See the empirical spike below for closure of the original open question.
+**Last updated:** 2026-06-04.
 **Environment verified against:** Xcode 26.4.1, CoreSimulator `1051.50`, macOS 26.4 SDK.
 
 ---

@@ -92,9 +92,27 @@ let package = Package(
         ),
 
         .target(
+            name: "SecurityPrivate",
+            path: "GeistCast/Sources/SecurityPrivate",
+            publicHeadersPath: "include"
+        ),
+
+        .target(
             name: "GeistBroadcast",
-            dependencies: ["GeistKit", "GeistBroadcastShimCore", "SimulatorScreenCapture"],
+            dependencies: [
+                "GeistKit",
+                "GeistBroadcastShimCore",
+                "SimulatorScreenCapture",
+                "CoreSimulatorPrivate",
+                "SecurityPrivate",
+            ],
             path: "GeistCast/Sources/GeistBroadcast",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
+                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
+                ]),
+            ],
             plugins: ["BuildShim"]
         ),
 
@@ -104,13 +122,8 @@ let package = Package(
             path: "GeistCast/Tests/GeistBroadcastTests"
         ),
 
-        // MARK: - GeistCast spike (throwaway)
-
-        .target(
-            name: "SecurityPrivate",
-            path: "GeistCast/Spike/SecurityPrivate",
-            publicHeadersPath: "include"
-        ),
+        // MARK: - GeistCast smoke test (the §0 spike from NO_SHELLOUT_RESEARCH.md;
+        // kept as a runnable end-to-end smoke test against a booted simulator)
 
         .executableTarget(
             name: "RecodeSpike",

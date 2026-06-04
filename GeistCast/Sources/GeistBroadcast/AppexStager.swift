@@ -1,5 +1,7 @@
 import Foundation
 import GeistKit
+import Security
+import SecurityPrivate
 
 struct StagedAppex: Sendable, Equatable {
     let binaryPath: String
@@ -7,6 +9,14 @@ struct StagedAppex: Sendable, Equatable {
 
 protocol AppexStaging: Sendable {
     func stage(appexAt sourcePath: String) async throws -> StagedAppex
+}
+
+protocol BundleResigning: Sendable {
+    /// Re-signs `bundlePath` adhoc, replacing the existing signature. Reads
+    /// the bundle's current embedded entitlements, drops `scrubbingKey` from
+    /// them, and writes the scrubbed plist back in the
+    /// `CSMAGIC_EMBEDDED_ENTITLEMENTS`-wrapped form required by `SecCodeSigner`.
+    func resign(bundleAt bundlePath: String, scrubbingKey: String) throws
 }
 
 struct AppexStager: AppexStaging, Sendable {
@@ -17,12 +27,12 @@ struct AppexStager: AppexStaging, Sendable {
     }
 
     private let fileSystem: any FileSystem
-    private let process: any ProcessRunner
+    private let resigner: any BundleResigning
 
     init(fileSystem: any FileSystem = LiveFileSystem(),
-         process: any ProcessRunner = LiveProcessRunner()) {
+         resigner: any BundleResigning = LiveBundleResigner()) {
         self.fileSystem = fileSystem
-        self.process = process
+        self.resigner = resigner
     }
 
     func stage(appexAt sourcePath: String) async throws -> StagedAppex {
@@ -33,67 +43,8 @@ struct AppexStager: AppexStaging, Sendable {
             throw StagerError.missingExecutableName(plistPath: "\(stagedAppex)/Info.plist")
         }
         let binaryPath = "\(stagedAppex)/\(executableName)"
-        // Patching Info.plist invalidates _CodeSignature/CodeResources, which
-        // launchd_sim refuses to spawn. Re-codesign the bundle, preserving the
-        // binary's embedded entitlements.
-        try await recodesign(appexPath: stagedAppex, binaryPath: binaryPath)
+        try resigner.resign(bundleAt: stagedAppex, scrubbingKey: "application-identifier")
         return StagedAppex(binaryPath: binaryPath)
-    }
-
-    private func recodesign(appexPath: String, binaryPath: String) async throws {
-        // Temp files live OUTSIDE the bundle so `codesign --force` doesn't seal
-        // them into _CodeSignature/CodeResources (which would then complain
-        // "sealed resource missing" once we clean them up).
-        let tmpBase = "/tmp/geistcast-recodesign-\(UUID().uuidString)"
-        let thinBinary = "\(tmpBase).bin"
-        let entitlementsFile = "\(tmpBase).entitlements.plist"
-
-        // Thin the fat binary so segedit can operate on it.
-        _ = try await process.run(ProcessInvocation(
-            executable: "/usr/bin/lipo",
-            arguments: ["-thin", "arm64", binaryPath, "-output", thinBinary],
-            environment: [:]
-        ))
-
-        _ = try await process.run(ProcessInvocation(
-            executable: "/usr/bin/xcrun",
-            arguments: ["segedit", thinBinary,
-                        "-extract", "__TEXT", "__entitlements", entitlementsFile],
-            environment: [:]
-        ))
-
-        // xcodebuild bakes a team-prefixed `application-identifier` even for
-        // adhoc signing; launchd_sim refuses to spawn with that mismatch.
-        // Failures here are recoverable (codesign will surface its own error
-        // downstream), so just log and continue rather than throwing.
-        scrubEntitlements(at: entitlementsFile)
-
-        _ = try await process.run(ProcessInvocation(
-            executable: "/usr/bin/codesign",
-            arguments: ["--force", "--sign", "-",
-                        "--entitlements", entitlementsFile,
-                        appexPath],
-            environment: [:]
-        ))
-    }
-
-    private func scrubEntitlements(at entitlementsFile: String) {
-        do {
-            let entData = try fileSystem.contentsOfFile(atPath: entitlementsFile)
-            guard var plist = try PropertyListSerialization.propertyList(
-                from: entData, format: nil
-            ) as? [String: Any] else {
-                log.warn("AppexStager: entitlements scrub skipped — plist not a dict")
-                return
-            }
-            plist.removeValue(forKey: "application-identifier")
-            let cleaned = try PropertyListSerialization.data(
-                fromPropertyList: plist, format: .xml, options: 0
-            )
-            try fileSystem.write(cleaned, toPath: entitlementsFile)
-        } catch {
-            log.warn("AppexStager: entitlements scrub failed: \(error)")
-        }
     }
 
     private func patchPackageType(at appexPath: String) throws -> [String: Any] {
@@ -110,5 +61,94 @@ struct AppexStager: AppexStaging, Sendable {
         )
         try fileSystem.write(patched, toPath: plistPath)
         return plist
+    }
+}
+
+/// Adhoc re-signer that calls into the Security framework SPI directly.
+/// Replaces the `lipo -thin` + `xcrun segedit -extract __entitlements` +
+/// `codesign --force --sign -` shellout chain. The bundle's existing
+/// signature is read (entitlements extracted from the embedded blob),
+/// `scrubbingKey` is dropped from the dict, and the result is wrapped
+/// with `CSMAGIC_EMBEDDED_ENTITLEMENTS` (0xFADE7171 + big-endian length +
+/// XML plist) before passing to `SecCodeSigner` — that wrapping is
+/// required and is not documented in any Apple-shipped header.
+struct LiveBundleResigner: BundleResigning {
+
+    enum ResignerError: Error {
+        case staticCodeCreateFailed(OSStatus)
+        case signingInformationFailed(OSStatus)
+        case signerCreateFailed(OSStatus)
+        case signFailed(status: OSStatus, error: CFError?)
+    }
+
+    private static let csMagicEmbeddedEntitlements: UInt32 = 0xFADE7171
+
+    func resign(bundleAt bundlePath: String, scrubbingKey: String) throws {
+        var staticCode: SecStaticCode?
+        let createStatus = SecStaticCodeCreateWithPath(
+            URL(fileURLWithPath: bundlePath) as CFURL,
+            SecCSFlags(rawValue: 0),
+            &staticCode
+        )
+        guard createStatus == errSecSuccess, let code = staticCode else {
+            throw ResignerError.staticCodeCreateFailed(createStatus)
+        }
+
+        var info: CFDictionary?
+        let infoStatus = SecCodeCopySigningInformation(
+            code,
+            SecCSFlags(rawValue: kSecCSRequirementInformation),
+            &info
+        )
+        guard infoStatus == errSecSuccess, let infoDict = info as? [String: Any] else {
+            throw ResignerError.signingInformationFailed(infoStatus)
+        }
+
+        var entitlements: [String: Any] = (infoDict["entitlements-dict"] as? [String: Any]) ?? [:]
+        entitlements.removeValue(forKey: scrubbingKey)
+
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: entitlements,
+            format: .xml,
+            options: 0
+        )
+        let wrapped = Self.wrapEntitlements(plistData)
+
+        let signerParams: [CFString: Any] = [
+            kSecCodeSignerIdentity: kCFNull,
+            kSecCodeSignerEntitlements: wrapped as NSData,
+        ]
+
+        var signer: SecCodeSignerRef?
+        let signerStatus = SecCodeSignerCreate(
+            signerParams as CFDictionary,
+            SecCSFlags(rawValue: 0),
+            &signer
+        )
+        guard signerStatus == errSecSuccess, let signerRef = signer else {
+            throw ResignerError.signerCreateFailed(signerStatus)
+        }
+
+        var cfError: Unmanaged<CFError>?
+        let signStatus = SecCodeSignerAddSignatureWithErrors(
+            signerRef,
+            code,
+            SecCSFlags(rawValue: 0),
+            &cfError
+        )
+        if signStatus != errSecSuccess {
+            throw ResignerError.signFailed(
+                status: signStatus,
+                error: cfError?.takeRetainedValue()
+            )
+        }
+    }
+
+    private static func wrapEntitlements(_ xml: Data) -> Data {
+        var blob = Data()
+        withUnsafeBytes(of: csMagicEmbeddedEntitlements.bigEndian) { blob.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(8 + xml.count).bigEndian) { blob.append(contentsOf: $0) }
+        blob.append(xml)
+        return blob
     }
 }

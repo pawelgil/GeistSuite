@@ -1,5 +1,8 @@
+import CoreSimulatorPrivate
+import Darwin
 import Foundation
 import GeistKit
+import Synchronization
 
 protocol AppexSpawning: Sendable {
     func spawn(stagedBinary: String,
@@ -9,21 +12,21 @@ protocol AppexSpawning: Sendable {
     func killStale(stagedBinary: String) async
 }
 
-struct AppexSpawner: AppexSpawning, Sendable {
+/// Spawns staged appex binaries on a booted simulator by calling
+/// `SimDevice.spawnWithPath:options:terminationQueue:terminationHandler:pid:error:`
+/// directly. Replaces the `xcrun simctl spawn …` + `pkill -9 -f …`
+/// shellouts. The previously-spawned pid for a given staged binary is
+/// tracked per-spawner instance so that `killStale` can deliver a real
+/// `kill(pid, SIGKILL)` instead of guessing by command-line match.
+final class AppexSpawner: AppexSpawning, Sendable {
 
-    private let process: any ProcessRunner
-
-    init(process: any ProcessRunner = LiveProcessRunner()) {
-        self.process = process
+    enum SpawnError: Error {
+        case spawnFailed(reason: String)
     }
 
-    func killStale(stagedBinary: String) async {
-        _ = try? await process.run(ProcessInvocation(
-            executable: "/usr/bin/pkill",
-            arguments: ["-9", "-f", stagedBinary],
-            environment: [:]
-        ))
-    }
+    private let trackedPIDs = Mutex<[String: pid_t]>([:])
+
+    init() {}
 
     func spawn(
         stagedBinary: String,
@@ -32,26 +35,43 @@ struct AppexSpawner: AppexSpawning, Sendable {
         environment: [String: String]
     ) async throws {
         await killStale(stagedBinary: stagedBinary)
-        var arguments = ["simctl"]
-        if let setPath = simctlSetPath {
-            arguments.append(contentsOf: ["--set", setPath])
+        guard let udid = UUID(uuidString: simulatorUDID) else {
+            throw SpawnError.spawnFailed(reason: "invalid UDID '\(simulatorUDID)'")
         }
-        arguments.append(contentsOf: ["spawn", simulatorUDID, stagedBinary])
+        let device = try SimDeviceResolver.resolve(udid: udid, simctlSetPath: simctlSetPath)
+        let options: [String: Any] = [
+            "arguments": [stagedBinary],
+            "environment": environment,
+            "stdin": 0,
+            "stdout": 1,
+            "stderr": 2,
+            "standalone": kCFBooleanFalse as Any,
+        ]
+        var pidValue: Int32 = 0
+        var spawnErr: AnyObject?
+        let ok = device.spawn(
+            withPath: stagedBinary,
+            options: options,
+            terminationQueue: DispatchQueue.global(qos: .utility),
+            terminationHandler: { _ in } as @convention(block) (Int32) -> Void,
+            pid: &pidValue,
+            error: &spawnErr
+        )
+        guard ok else {
+            let msg = (spawnErr as? NSError)?.localizedDescription
+                ?? String(describing: spawnErr)
+            throw SpawnError.spawnFailed(reason: msg)
+        }
+        trackedPIDs.withLock { $0[stagedBinary] = pidValue }
+    }
 
-        // `simctl spawn` forwards env vars whose names start with
-        // `SIMCTL_CHILD_` to the spawned process with that prefix stripped.
-        let childEnv: [String: String] = environment.reduce(into: [:]) { dict, kv in
-            dict["SIMCTL_CHILD_\(kv.key)"] = kv.value
+    func killStale(stagedBinary: String) async {
+        let pid = trackedPIDs.withLock { dict -> pid_t? in
+            let value = dict.removeValue(forKey: stagedBinary)
+            return value
         }
-
-        let result = try await process.run(ProcessInvocation(
-            executable: "/usr/bin/xcrun",
-            arguments: arguments,
-            environment: childEnv
-        ))
-        if result.exitStatus != 0 {
-            let stderr = String(decoding: result.stderr, as: UTF8.self)
-            log.warn("AppexSpawner: simctl spawn exited \(result.exitStatus): \(stderr)")
-        }
+        guard let pid, pid > 0 else { return }
+        // SIGKILL: appex processes don't trap signals usefully.
+        _ = kill(pid, SIGKILL)
     }
 }

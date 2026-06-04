@@ -1,3 +1,4 @@
+import CoreSimulatorPrivate
 import Foundation
 import GeistKit
 
@@ -13,25 +14,25 @@ enum ExtensionDiscoveryError: Error, Equatable {
     case appNotInstalled(bundleID: String)
     case noBroadcastExtension(hostBundleID: String)
     case ambiguousBroadcastExtensions(hostBundleID: String, candidates: [String])
-    case simctlFailed(stderr: String)
+    case installedAppsFailed(String)
 }
 
 enum ExtensionDiscovery {
     static let broadcastUploadPointID = "com.apple.broadcast-services-upload"
 
-    // If `extensionBundleID` is nil, expects exactly one broadcast upload
-    // extension in the host app's PlugIns directory.
+    /// If `extensionBundleID` is nil, expects exactly one broadcast upload
+    /// extension in the host app's PlugIns directory.
     static func resolve(
         simulator: UUID,
         hostBundleID: String,
         extensionBundleID: String?,
-        simctlSetPath: String?,
-        runner: any ProcessRunner = LiveProcessRunner()
+        simctlSetPath: String?
     ) async throws -> (extensionBundleID: String, appexPath: String) {
-        let appPath = try await appContainerPath(
-            simulator: simulator, hostBundleID: hostBundleID,
-            simctlSetPath: simctlSetPath, runner: runner
-        )
+        let installedApps = try installedApps(simulator: simulator, simctlSetPath: simctlSetPath)
+        guard let entry = installedApps[hostBundleID],
+              let appPath = entry["Path"] as? String else {
+            throw ExtensionDiscoveryError.appNotInstalled(bundleID: hostBundleID)
+        }
         let appexes = try discoverBroadcastAppexes(appPath: appPath)
         if let pinned = extensionBundleID {
             guard let match = appexes.first(where: { $0.bundleID == pinned }) else {
@@ -50,12 +51,9 @@ enum ExtensionDiscovery {
 
     static func broadcastCapableApps(
         simulator: UUID,
-        simctlSetPath: String?,
-        runner: any ProcessRunner = LiveProcessRunner()
+        simctlSetPath: String?
     ) async throws -> [BroadcastApp] {
-        let raw = try await simctlListApps(
-            simulator: simulator, simctlSetPath: simctlSetPath, runner: runner
-        )
+        let raw = try installedApps(simulator: simulator, simctlSetPath: simctlSetPath)
         var apps: [BroadcastApp] = []
         for (bundleID, info) in raw {
             guard let appPath = info["Path"] as? String else { continue }
@@ -77,55 +75,23 @@ enum ExtensionDiscovery {
 
     // MARK: - Internals
 
-    private static func appContainerPath(
+    private static func installedApps(
         simulator: UUID,
-        hostBundleID: String,
-        simctlSetPath: String?,
-        runner: any ProcessRunner
-    ) async throws -> String {
-        var args: [String] = []
-        if let simctlSetPath { args += ["--set", simctlSetPath] }
-        args += ["get_app_container", simulator.uuidString, hostBundleID, "app"]
-        let result = try await runner.run(ProcessInvocation(
-            executable: "/usr/bin/xcrun",
-            arguments: ["simctl"] + args,
-            environment: [:]
-        ))
-        let stdout = String(data: result.stdout, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
-        if result.exitStatus != 0 || stdout.isEmpty {
-            if stderr.contains("No such file or directory") || stderr.contains("not found") {
-                throw ExtensionDiscoveryError.appNotInstalled(bundleID: hostBundleID)
-            }
-            throw ExtensionDiscoveryError.simctlFailed(stderr: stderr)
+        simctlSetPath: String?
+    ) throws -> [String: [String: Any]] {
+        let device = try SimDeviceResolver.resolve(udid: simulator, simctlSetPath: simctlSetPath)
+        let raw: Any
+        do {
+            raw = try device.installedApps()
+        } catch {
+            throw ExtensionDiscoveryError.installedAppsFailed(String(describing: error))
         }
-        return stdout
-    }
-
-    private static func simctlListApps(
-        simulator: UUID,
-        simctlSetPath: String?,
-        runner: any ProcessRunner
-    ) async throws -> [String: [String: Any]] {
-        var args: [String] = []
-        if let simctlSetPath { args += ["--set", simctlSetPath] }
-        args += ["listapps", simulator.uuidString]
-        let result = try await runner.run(ProcessInvocation(
-            executable: "/usr/bin/xcrun",
-            arguments: ["simctl"] + args,
-            environment: [:]
-        ))
-        if result.exitStatus != 0 {
-            throw ExtensionDiscoveryError.simctlFailed(
-                stderr: String(data: result.stderr, encoding: .utf8) ?? ""
+        guard let dict = raw as? [String: [String: Any]] else {
+            throw ExtensionDiscoveryError.installedAppsFailed(
+                "installedAppsWithError returned \(type(of: raw))"
             )
         }
-        // simctl listapps emits an OpenStep plist on stdout.
-        let parsed = try? PropertyListSerialization.propertyList(
-            from: result.stdout, options: [], format: nil
-        )
-        return (parsed as? [String: [String: Any]]) ?? [:]
+        return dict
     }
 
     private struct BroadcastAppex {
