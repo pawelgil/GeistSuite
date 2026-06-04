@@ -184,12 +184,44 @@ The broadcast side needs a `SimDevice` to call `spawnWithPath:` / `installedApps
 
 ---
 
-## Open question (one unverified link)
+## ~~Open question~~ — closed by spike
 
-Whether an **in-process adhoc re-sign with scrubbed entitlements** (`SecCodeSigner`) satisfies `launchd_sim` *exactly* as the `codesign` CLI does. It should — `SecCodeSigner` is the same machinery `codesign` wraps — but it is the only step not yet exercised. Two ways to close it (neither needs production code):
+The open question — whether an in-process adhoc re-sign with scrubbed entitlements satisfies `launchd_sim` — was closed empirically on 2026-06-04 by the `RecodeSpike` executable at `GeistCast/Spike/RecodeSpike/`. The spike performs the full pipeline (patch Info.plist → read entitlements → scrub → SecCodeSigner adhoc re-sign → SimDevice non-standalone spawn with DYLD_INSERT_LIBRARIES) against a real booted simulator and waits for the extension shim's HELLO on the control socket.
 
-1. **Empirical (fast):** stage one appex in-process and `spawnWithPath:` it non-standalone; confirm it launches and the extension shim connects.
-2. **Static (thorough):** disassemble CoreSimulator's `-[SimDevice spawnWithPath:options:…]` → `_spawnFromLaunchdWithPath:` to see precisely what `launchd_sim` validates (CFBundlePackageType + entitlements vs. full signature), establishing the *minimum* staging required.
+Result: **HELLO received**, exit 0. `launchd_sim` accepted the in-process signature. All four no-shellout replacement steps (discovery, spawn, kill-stale via pid, in-process staging) are now empirically de-risked.
+
+### One undocumented detail the spike discovered
+
+`SecCodeSigner`'s `kSecCodeSignerEntitlements` value is **NOT** raw XML plist data despite what the `codesign --entitlements file.plist` CLI looks like from the outside. The CLI internally wraps the plist with a `CSMAGIC_EMBEDDED_ENTITLEMENTS` header before embedding. `SecCodeSigner` expects the **already-wrapped** form:
+
+```
+[0xFADE7171 big-endian][total length big-endian uint32][XML plist payload]
+```
+
+Passing unwrapped XML plist to `kSecCodeSignerEntitlements` produces a SIGBUS inside `SecCodeSignerAddSignatureWithErrors` (no recoverable error, just a crash). Verified on macOS 26.4 / Xcode 26.4.1. The Swift snippet:
+
+```swift
+let xml = try PropertyListSerialization.data(fromPropertyList: entitlements, format: .xml, options: 0)
+var wrapped = Data()
+withUnsafeBytes(of: UInt32(0xFADE7171).bigEndian) { wrapped.append(contentsOf: $0) }
+withUnsafeBytes(of: UInt32(8 + xml.count).bigEndian) { wrapped.append(contentsOf: $0) }
+wrapped.append(xml)
+// then pass `wrapped as NSData` for kSecCodeSignerEntitlements
+```
+
+This is not in any Apple-shipped header or sample, only visible by reading `Security`'s assembly or by hitting the crash empirically. **Document it in the production code.**
+
+### Other findings from the spike
+
+- `installedAppsWithError:` returns a `[bundleID: [String: Any]]` dict; the `Path` key holds the absolute install path that today's `simctl get_app_container ... app` shellout returns. Drop-in replacement.
+- `SimDevice.spawnWithPath:` accepts the spawn options dictionary using **string keys** (`"arguments"`, `"environment"`, `"stdin"`, etc.) — the `SimDeviceSpawnKey…` symbols *exist* but Swift's bridging from `[String: Any]` to the underlying dict works fine with bare strings too. Cleaner code path; same observable behavior.
+- `terminationHandler:` must be typed as `@convention(block) (Int32) -> Void` in Swift — Swift's closure inference picks the wrong overload otherwise.
+- `DYLD_INSERT_LIBRARIES` passes through `SimDevice spawnWithPath`'s `environment` dict verbatim. The `SIMCTL_CHILD_` prefix that `simctl spawn` requires is purely a CLI workaround; the direct path doesn't need it.
+- Standalone spawn confirmed unsuitable (§5): the spike runs non-standalone and the shim connects to its control socket, which requires mach bootstrap.
+
+### Alternate verification
+
+If the spike ever regresses on a future macOS/Xcode pair: rerun `cd GeistSuite && swift run RecodeSpike <booted-sim-udid> <host-bundle-id> <path-to-GeistBroadcastExtensionShim.dylib>`. Re-prints the HELLO it receives or exits 3 with diagnostics.
 
 ---
 

@@ -103,5 +103,25 @@ let package = Package(
             dependencies: ["GeistBroadcast", "GeistBroadcastShimCore"],
             path: "GeistCast/Tests/GeistBroadcastTests"
         ),
+
+        // MARK: - GeistCast spike (throwaway)
+
+        .target(
+            name: "SecurityPrivate",
+            path: "GeistCast/Spike/SecurityPrivate",
+            publicHeadersPath: "include"
+        ),
+
+        .executableTarget(
+            name: "RecodeSpike",
+            dependencies: ["CoreSimulatorPrivate", "SecurityPrivate"],
+            path: "GeistCast/Spike/RecodeSpike",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
+                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
+                ]),
+            ]
+        ),
     ]
 )
