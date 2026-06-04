@@ -10,92 +10,98 @@ let package = Package(
         .library(name: "GeistBroadcast", targets: ["GeistBroadcast"]),
     ],
     targets: [
+        // MARK: - GeistCore
+
         .target(
             name: "CoreSimulatorPrivate",
-            path: "Sources/CoreSimulatorPrivate",
+            path: "GeistCore/Sources/CoreSimulatorPrivate",
             publicHeadersPath: "include"
         ),
 
         .target(
             name: "SharedShimCore",
-            path: "Sources/SharedShimCore",
-            publicHeadersPath: "include"
-        ),
-
-        .target(
-            name: "GeistCameraShimCore",
-            path: "Sources/GeistCameraShimCore",
-            publicHeadersPath: "include"
-        ),
-
-        .target(
-            name: "GeistBroadcastShimCore",
-            dependencies: ["SharedShimCore"],
-            path: "Sources/GeistBroadcastShimCore",
+            path: "GeistCore/Sources/SharedShimCore",
             publicHeadersPath: "include"
         ),
 
         .target(
             name: "GeistKit",
             dependencies: ["CoreSimulatorPrivate"],
-            path: "Sources/GeistKit",
+            path: "GeistCore/Sources/GeistKit",
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
                     "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
                 ]),
             ]
-        ),
-
-        .target(
-            name: "SimulatorScreenCapture",
-            dependencies: ["CoreSimulatorPrivate", "GeistKit"],
-            path: "Sources/SimulatorScreenCapture",
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
-                ]),
-            ]
-        ),
-
-        .target(
-            name: "GeistCamera",
-            dependencies: ["GeistKit", "GeistCameraShimCore"],
-            path: "Sources/GeistCamera",
-            plugins: ["BuildShim"]
-        ),
-
-        .target(
-            name: "GeistBroadcast",
-            dependencies: ["GeistKit", "GeistBroadcastShimCore", "SimulatorScreenCapture"],
-            path: "Sources/GeistBroadcast",
-            plugins: ["BuildShim"]
         ),
 
         .plugin(
             name: "BuildShim",
             capability: .buildTool(),
-            path: "Plugins/BuildShim"
+            path: "GeistCore/Plugins/BuildShim"
         ),
 
         .testTarget(
             name: "GeistKitTests",
             dependencies: ["GeistKit"],
-            path: "Tests/GeistKitTests"
+            path: "GeistCore/Tests/GeistKitTests"
+        ),
+
+        // MARK: - GeistLens (camera)
+
+        .target(
+            name: "GeistCameraShimCore",
+            path: "GeistLens/Sources/GeistCameraShimCore",
+            publicHeadersPath: "include"
+        ),
+
+        .target(
+            name: "GeistCamera",
+            dependencies: ["GeistKit", "GeistCameraShimCore"],
+            path: "GeistLens/Sources/GeistCamera",
+            plugins: ["BuildShim"]
         ),
 
         .testTarget(
             name: "GeistCameraTests",
             dependencies: ["GeistCamera", "GeistCameraShimCore"],
-            path: "Tests/GeistCameraTests",
+            path: "GeistLens/Tests/GeistCameraTests",
             resources: [.process("Fixtures")]
+        ),
+
+        // MARK: - GeistCast (broadcast)
+
+        .target(
+            name: "GeistBroadcastShimCore",
+            dependencies: ["SharedShimCore"],
+            path: "GeistCast/Sources/GeistBroadcastShimCore",
+            publicHeadersPath: "include"
+        ),
+
+        .target(
+            name: "SimulatorScreenCapture",
+            dependencies: ["CoreSimulatorPrivate", "GeistKit"],
+            path: "GeistCast/Sources/SimulatorScreenCapture",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
+                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
+                ]),
+            ]
+        ),
+
+        .target(
+            name: "GeistBroadcast",
+            dependencies: ["GeistKit", "GeistBroadcastShimCore", "SimulatorScreenCapture"],
+            path: "GeistCast/Sources/GeistBroadcast",
+            plugins: ["BuildShim"]
         ),
 
         .testTarget(
             name: "GeistBroadcastTests",
             dependencies: ["GeistBroadcast", "GeistBroadcastShimCore"],
-            path: "Tests/GeistBroadcastTests"
+            path: "GeistCast/Tests/GeistBroadcastTests"
         ),
     ]
 )

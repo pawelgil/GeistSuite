@@ -8,35 +8,38 @@ struct BuildShim: BuildToolPlugin {
 
     func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] {
         let packageRoot = context.package.directoryURL
-        let sourcesRoot = packageRoot.appending(path: "Sources")
         let outputDir = context.pluginWorkDirectoryURL
 
         switch target.name {
         case "GeistCamera":
-            let cameraShimCoreDir = sourcesRoot.appending(path: "GeistCameraShimCore")
+            let cameraShimCoreDir = packageRoot.appending(path: "GeistLens/Sources/GeistCameraShimCore")
+            let cameraShimDir = packageRoot.appending(path: "GeistLens/Sources/GeistCamShim")
             let cameraCompile = try Self.gather(under: cameraShimCoreDir, extensions: ["m", "c"])
             let cameraInputs = try Self.gather(under: cameraShimCoreDir, extensions: Self.trackedExtensions)
             return [
                 try Self.buildCommand(
                     name: "GeistCamShim",
-                    modeDir: sourcesRoot.appending(path: "GeistCamShim"),
+                    modeDir: cameraShimDir,
                     outputDir: outputDir,
                     headerSearchDirs: [cameraShimCoreDir],
                     coreCompile: cameraCompile,
                     coreInputs: cameraInputs
                 ),
             ]
+
         case "GeistBroadcast":
-            let sharedShimDir = sourcesRoot.appending(path: "SharedShimCore")
+            let sharedShimDir = packageRoot.appending(path: "GeistCore/Sources/SharedShimCore")
+            let broadcastShimCoreDir = packageRoot.appending(path: "GeistCast/Sources/GeistBroadcastShimCore")
+            let broadcastAppShimDir = packageRoot.appending(path: "GeistCast/Sources/GeistBroadcastAppShim")
+            let broadcastExtShimDir = packageRoot.appending(path: "GeistCast/Sources/GeistBroadcastExtensionShim")
             let sharedCompile = try Self.gather(under: sharedShimDir, extensions: ["m", "c"])
             let sharedInputs = try Self.gather(under: sharedShimDir, extensions: Self.trackedExtensions)
-            let broadcastShimCoreDir = sourcesRoot.appending(path: "GeistBroadcastShimCore")
             let broadcastCompile = try Self.gather(under: broadcastShimCoreDir, extensions: ["m", "c"])
             let broadcastInputs = try Self.gather(under: broadcastShimCoreDir, extensions: Self.trackedExtensions)
             return [
                 try Self.buildCommand(
                     name: "GeistBroadcastAppShim",
-                    modeDir: sourcesRoot.appending(path: "GeistBroadcastAppShim"),
+                    modeDir: broadcastAppShimDir,
                     outputDir: outputDir,
                     headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
                     coreCompile: sharedCompile + broadcastCompile,
@@ -44,13 +47,14 @@ struct BuildShim: BuildToolPlugin {
                 ),
                 try Self.buildCommand(
                     name: "GeistBroadcastExtensionShim",
-                    modeDir: sourcesRoot.appending(path: "GeistBroadcastExtensionShim"),
+                    modeDir: broadcastExtShimDir,
                     outputDir: outputDir,
                     headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
                     coreCompile: sharedCompile + broadcastCompile,
                     coreInputs: sharedInputs + broadcastInputs
                 ),
             ]
+
         default:
             return []
         }
