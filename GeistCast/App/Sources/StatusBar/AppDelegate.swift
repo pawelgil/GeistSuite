@@ -1,7 +1,7 @@
 import AppKit
 import AVFoundation
 import GeistBroadcast
-import GeistKit
+import GeistBroadcast
 
 @main
 @MainActor

@@ -1,5 +1,5 @@
 import Foundation
-import GeistKit
+import GeistBroadcast
 
 struct LaunchctlShimInjector: Sendable {
     private let process: any ProcessRunning

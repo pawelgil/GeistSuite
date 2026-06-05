@@ -43,8 +43,6 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: GeistLens
     dependencies:
       - package: Geist
-        product: GeistKit
-      - package: Geist
         product: GeistCamera
       - target: GeistLensCLI
         embed: true

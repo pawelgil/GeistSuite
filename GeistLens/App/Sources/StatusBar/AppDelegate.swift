@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 import Darwin
 import GeistCamera
-import GeistKit
+import GeistCamera
 
 @main
 @MainActor
