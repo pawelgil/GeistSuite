@@ -16,6 +16,7 @@ jobs:
   package:
     name: Swift package
     runs-on: macos-15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
@@ -29,11 +30,17 @@ jobs:
       - name: swift build
         run: swift build
       - name: swift test
-        run: swift test
+        # --no-parallel: parallel test execution deadlocks because the broadcast
+        # session uses a shared filesystem rendezvous (`/tmp/geistcast-<sim>-<bundle>.sock`)
+        # constructed inline. Concurrent tests with the same (sim, bundleID) tuple
+        # cross-wire through that path. Follow-up: introduce a `SocketAddressing`
+        # seam so tests can inject per-test paths, then remove this flag.
+        run: timeout 60 swift test --no-parallel
 
   app:
     name: ${{ matrix.app }} app build
     runs-on: macos-15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:

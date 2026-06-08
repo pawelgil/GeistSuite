@@ -15,6 +15,7 @@ jobs:
   build:
     name: Build & notarize ${{ matrix.app }}
     runs-on: macos-15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
