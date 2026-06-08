@@ -20,9 +20,11 @@ jobs:
       matrix:
         include:
           - app: GeistCast
+            app-dir: GeistCast/App
             project: GeistCast/App/GeistCast.xcodeproj
             scheme: GeistCast
           - app: GeistLens
+            app-dir: GeistLens/App
             project: GeistLens/App/GeistLens.xcodeproj
             scheme: GeistLens
     steps:
@@ -30,6 +32,11 @@ jobs:
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: ${{ env.XCODE_VERSION }}
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate ${{ matrix.app }}.xcodeproj
+        run: xcodegen generate
+        working-directory: ${{ matrix.app-dir }}
 
       - name: Import Developer ID certificate
         env:
