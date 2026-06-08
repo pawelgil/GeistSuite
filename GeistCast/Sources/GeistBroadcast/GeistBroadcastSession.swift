@@ -681,8 +681,8 @@ public actor GeistBroadcastSession {
             // stopBroadcast() and cleanupConnection() may have already
             // processed the end — re-firing the delegate and re-sending the
             // wire envelope to the host would confuse the host's state
-            // machine (HOST treats a late "ended" as a forced stop and
-            // bounces the user out of its questionnaire).
+            // machine (some hosts treat a late "ended" as a forced stop and
+            // disrupt the user flow as a result).
             let wasActive = activeBroadcasts.remove(broadcast) != nil
             pausedBroadcasts.remove(broadcast)
             if wasActive {

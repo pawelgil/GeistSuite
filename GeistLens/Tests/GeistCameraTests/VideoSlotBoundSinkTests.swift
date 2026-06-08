@@ -45,7 +45,8 @@ struct VideoSlotBoundSinkTests {
                                                   pixelFormat: .yuv420VideoRange, fps: 30))
 
         // Producer still emits full range; without conversion the shim would
-        // drop every frame as a mismatch (the HOST black-preview bug).
+        // drop every frame as a mismatch (a real host-app bug seen in the
+        // field where the preview rendered all-black until conversion).
         sink.sendVideo(Self.makePixelBuffer(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
                        pts: .zero, duration: .zero)
 

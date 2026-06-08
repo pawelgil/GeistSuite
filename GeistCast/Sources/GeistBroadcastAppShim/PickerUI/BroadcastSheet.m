@@ -613,8 +613,9 @@ static UIWindowScene *ActiveWindowScene(void) {
 // notifications. Our sheet is in-process, so the host's scene never
 // actually changes activation state. Synthesize the notifications around
 // the sheet's lifecycle so host code that observes UIApplication/UIScene
-// activation transitions (e.g. HOST's audio remediation step) behaves
-// the same way it does on real iOS.
+// activation transitions (e.g. an audio-remediation step that hosts run
+// when the user backgrounds the app) behaves the same way it does on
+// real iOS.
 //
 // Gap: UIApplication.shared.applicationState / UIScene.activationState
 // property reads and SwiftUI's @Environment(\.scenePhase) all key off the

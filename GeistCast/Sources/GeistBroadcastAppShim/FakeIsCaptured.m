@@ -32,9 +32,10 @@
 // binaries. UIKitCore's
 // `_screenTraitCollectionWithOverridesAppliedFromSceneUISettings` passes
 // `[screen isCaptured]` (BOOL: 0 or 1) straight into setSceneCaptureState:,
-// and HOST's Swift binary loads `mov w10, #0x1` for the `.active`
-// constant. So the runtime mapping is: unspecified=-1, inactive=0,
-// active=1. Setting any other value silently breaks every consumer.
+// and the host Swift binaries we've inspected load `mov w10, #0x1` for
+// the `.active` constant. So the runtime mapping is: unspecified=-1,
+// inactive=0, active=1. Setting any other value silently breaks every
+// consumer.
 
 #define GC_UISceneCaptureStateUnspecified  (-1)
 #define GC_UISceneCaptureStateInactive       0
