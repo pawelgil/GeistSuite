@@ -23,16 +23,15 @@ let package = Package(
             publicHeadersPath: "include"
         ),
 
+        .binaryTarget(
+            name: "CoreSimulator",
+            path: "GeistCore/Frameworks/CoreSimulator.xcframework"
+        ),
+
         .target(
             name: "GeistKit",
-            dependencies: ["CoreSimulatorPrivate"],
-            path: "GeistCore/Sources/GeistKit",
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
-                ]),
-            ]
+            dependencies: ["CoreSimulatorPrivate", "CoreSimulator"],
+            path: "GeistCore/Sources/GeistKit"
         ),
 
         .plugin(
@@ -80,14 +79,8 @@ let package = Package(
 
         .target(
             name: "SimulatorScreenCapture",
-            dependencies: ["CoreSimulatorPrivate", "GeistKit"],
-            path: "GeistCast/Sources/SimulatorScreenCapture",
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
-                ]),
-            ]
+            dependencies: ["CoreSimulatorPrivate", "GeistKit", "CoreSimulator"],
+            path: "GeistCast/Sources/SimulatorScreenCapture"
         ),
 
         .target(
@@ -103,15 +96,10 @@ let package = Package(
                 "GeistBroadcastShimCore",
                 "SimulatorScreenCapture",
                 "CoreSimulatorPrivate",
+                "CoreSimulator",
                 "SecurityPrivate",
             ],
             path: "GeistCast/Sources/GeistBroadcast",
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
-                ]),
-            ],
             plugins: ["BuildShim"]
         ),
 
@@ -126,14 +114,8 @@ let package = Package(
 
         .executableTarget(
             name: "RecodeSpike",
-            dependencies: ["CoreSimulatorPrivate", "SecurityPrivate"],
-            path: "GeistCast/Spike/RecodeSpike",
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-F", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-weak_framework", "-Xlinker", "CoreSimulator",
-                ]),
-            ]
+            dependencies: ["CoreSimulatorPrivate", "CoreSimulator", "SecurityPrivate"],
+            path: "GeistCast/Spike/RecodeSpike"
         ),
     ]
 )
