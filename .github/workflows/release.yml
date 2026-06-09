@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  XCODE_VERSION: '26.3'
+  XCODE_VERSION: '16.4'
 
 jobs:
   build:
