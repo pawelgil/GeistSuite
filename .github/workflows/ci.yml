@@ -30,11 +30,13 @@ jobs:
       - name: swift build
         run: swift build
       - name: swift test
-        # --no-parallel: parallel test execution deadlocks because the broadcast
-        # session uses a shared filesystem rendezvous (`/tmp/geistcast-<sim>-<bundle>.sock`)
-        # constructed inline. Concurrent tests with the same (sim, bundleID) tuple
-        # cross-wire through that path. Follow-up: introduce a `SocketAddressing`
-        # seam so tests can inject per-test paths, then remove this flag.
+        # `swift test` runs all SPM test targets in one xctest process. Many
+        # broadcast and camera tests open Unix-domain sockets and use accept()
+        # to exercise the wire protocol; under `--parallel` the kernel accept
+        # queue and Swift Testing's scheduler interact pathologically and
+        # accept loops block on connections the test has already moved past.
+        # Serial execution finishes in ~4s — fast enough that parallelism
+        # isn't worth the audit it would take to fix every accept-loop suite.
         run: timeout 60 swift test --no-parallel
 
   app:
