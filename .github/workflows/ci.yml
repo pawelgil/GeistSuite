@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  XCODE_VERSION: latest-stable
+  XCODE_VERSION: '26.4'
 
 jobs:
   package:
@@ -37,7 +37,8 @@ jobs:
         # accept loops block on connections the test has already moved past.
         # Serial execution finishes in ~4s — fast enough that parallelism
         # isn't worth the audit it would take to fix every accept-loop suite.
-        run: timeout 60 swift test --no-parallel
+        # Job-level `timeout-minutes: 10` protects against any future regression.
+        run: swift test --no-parallel
 
   app:
     name: ${{ matrix.app }} app build
