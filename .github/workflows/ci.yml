@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  XCODE_VERSION: '26.4'
+  XCODE_VERSION: '26.3'
 
 jobs:
   package:
@@ -44,6 +44,11 @@ jobs:
     name: ${{ matrix.app }} app build
     runs-on: macos-15
     timeout-minutes: 10
+    # GeistLens uses the new Icon Composer `.icon` format; actool in the
+    # macos-15 runner's Xcode 26.3 crashes processing it (dyld error on
+    # CoreMedia caption symbols). Locally GeistLens builds clean on 26.4.
+    # Mark Lens non-blocking until the runner image picks up Xcode 26.4+.
+    continue-on-error: ${{ matrix.app == 'GeistLens' }}
     strategy:
       fail-fast: false
       matrix:
