@@ -12,7 +12,11 @@ import Testing
 //          -f lavfi -i "sine=frequency=440:duration=2:sample_rate=48000" \
 //          -c:v h264 -pix_fmt yuv420p -c:a aac -ac 1 -ar 48000 \
 //          Tests/GeistCamTests/Fixtures/AVTwoSeconds.mp4
-@Suite("VideoFileMediaSource")
+// AVFoundation's decode pipeline serializes at the process level — running
+// multiple AVAssetReaders concurrently against the same file blocks rather
+// than parallelizing. Mark the suite serialized so Swift Testing doesn't
+// race instances of VideoFileMediaSource against each other.
+@Suite("VideoFileMediaSource", .serialized)
 struct VideoFileMediaSourceTests {
     private static let fixtureName = "AVTwoSeconds.mp4"
 

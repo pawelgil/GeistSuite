@@ -1,0 +1,76 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64e-macos ]
+flags:           [ not_app_extension_safe ]
+install-name:    '/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/CoreSimulator'
+current-version: 1051.50
+swift-abi-version: 7
+reexported-libraries:
+  - targets:         [ x86_64-macos, arm64e-macos ]
+    libraries:       [ '/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Frameworks/CoreSimDeviceIO.framework/Versions/A/CoreSimDeviceIO' ]
+exports:
+  - targets:         [ x86_64-macos, arm64e-macos ]
+    symbols:         [ '_$sSo16SimDiskImageKindV13CoreSimulatorE11descriptionSSvg', 
+                       '_$sSo16SimDiskImageKindV13CoreSimulatorE11descriptionSSvpMV', 
+                       '_$sSo16SimDiskImageKindV13CoreSimulatorE8allCasesSayABGvgZ', 
+                       '_$sSo16SimDiskImageKindV13CoreSimulatorE8allCasesSayABGvpZMV', 
+                       '_$sSo16SimDiskImageKindVs12CaseIterable13CoreSimulatorMc', 
+                       '_$sSo16SimDiskImageKindVs23CustomStringConvertible13CoreSimulatorMc', 
+                       '_$sSo17SimDiskImageStateV13CoreSimulatorE11descriptionSSvg', 
+                       '_$sSo17SimDiskImageStateV13CoreSimulatorE11descriptionSSvpMV', 
+                       '_$sSo17SimDiskImageStateV13CoreSimulatorE8allCasesSayABGvgZ', 
+                       '_$sSo17SimDiskImageStateV13CoreSimulatorE8allCasesSayABGvpZMV', 
+                       '_$sSo17SimDiskImageStateVs12CaseIterable13CoreSimulatorMc', 
+                       '_$sSo17SimDiskImageStateVs23CustomStringConvertible13CoreSimulatorMc', 
+                       '_$sSo19SimDiskImageManagerC13CoreSimulatorE06reportC8Mounting14parentMountURL05innerbC8Strategy09effectiveH4Mode24successfullyPersonalized22authenticationTypeUsed20personalizationErrory10Foundation0K0VSg_S2iSbSiSSSgtFZ', 
+                       '_$sSo19SimDiskImageManagerC13CoreSimulatorE41shouldEnableInternalAuthenticationMethodsSbyF', 
+                       '_$sSo28SimDiskImageCopyMoveStrategyV13CoreSimulatorE11descriptionSSvg', 
+                       '_$sSo28SimDiskImageCopyMoveStrategyV13CoreSimulatorE11descriptionSSvpMV', 
+                       '_$sSo28SimDiskImageCopyMoveStrategyV13CoreSimulatorE8allCasesSayABGvgZ', 
+                       '_$sSo28SimDiskImageCopyMoveStrategyV13CoreSimulatorE8allCasesSayABGvpZMV', 
+                       '_$sSo28SimDiskImageCopyMoveStrategyVs12CaseIterable13CoreSimulatorMc', 
+                       '_$sSo28SimDiskImageCopyMoveStrategyVs23CustomStringConvertible13CoreSimulatorMc', 
+                       _SimDeviceBootKeyBinPref, _SimDeviceBootKeyDeathPort, _SimDeviceBootKeyDeviceType, 
+                       _SimDeviceBootKeyDisabledJobs, _SimDeviceBootKeyEnableCheckedAllocations, 
+                       _SimDeviceBootKeyEnvironment, _SimDeviceBootKeyPersist, _SimDeviceBootKeyRuntime, 
+                       _SimDeviceInstallOptionKeySkipWatchAppInstall, _SimDeviceLaunchApplicationEventTypeKeyBackgroundFetch, 
+                       _SimDeviceLaunchApplicationKeyArguments, _SimDeviceLaunchApplicationKeyBackgrounded, 
+                       _SimDeviceLaunchApplicationKeyBinPref, _SimDeviceLaunchApplicationKeyEnableCheckedAllocations, 
+                       _SimDeviceLaunchApplicationKeyEnvironment, _SimDeviceLaunchApplicationKeyEventType, 
+                       _SimDeviceLaunchApplicationKeyPayloadURL, _SimDeviceLaunchApplicationKeyStandardErrPath, 
+                       _SimDeviceLaunchApplicationKeyStandardOutPath, _SimDeviceLaunchApplicationKeyTerminateRunningProcess, 
+                       _SimDeviceLaunchApplicationKeyWaitForDebugger, _SimDeviceNotificationType_BootStatus, 
+                       _SimDeviceSetOptionHostPort, _SimDeviceSpawnKeyArguments, 
+                       _SimDeviceSpawnKeyBinPref, _SimDeviceSpawnKeyEnableCheckedAllocations, 
+                       _SimDeviceSpawnKeyEnvironment, _SimDeviceSpawnKeyStandalone, 
+                       _SimDeviceSpawnKeyStderr, _SimDeviceSpawnKeyStdin, _SimDeviceSpawnKeyStdout, 
+                       _SimDeviceSpawnKeyWaitForDebugger, _SimDiskImageStateDisplayString, 
+                       _SimDiskImageStateIsTerminal, _SimLogFence, _SimLogSetHandler, 
+                       _SimRuntimeMatchingOptionAllowedVariants, _SimRuntimeMatchingOptionBuildVersionString, 
+                       _SimRuntimeMatchingOptionFallBackOnVersionString, _SimRuntimeMatchingOptionIncludeUnavailable, 
+                       _SimRuntimeMatchingOptionPlatforms, _SimRuntimeMatchingOptionVersionString, 
+                       __SimLog, __SimLogASL, __SimLogCSS, __SimLogSTDERR, _kSimDeviceNotification_NewBootStatus, 
+                       _kSimDeviceNotification_PreviousBootStatus, _kSimDevicePropertyKeyDeviceType, 
+                       _kSimDevicePropertyKeyIsDeleted, _kSimDevicePropertyKeyIsEphemeral, 
+                       _kSimDevicePropertyKeyLastBootedAt, _kSimDevicePropertyKeyName, 
+                       _kSimDevicePropertyKeyRuntime, _kSimDevicePropertyKeyRuntimePolicy, 
+                       _kSimDevicePropertyKeyRuntimeSpecifier, _kSimDevicePropertyKeyState, 
+                       _kSimDevicePropertyKeyUDID, _kSimDeviceRuntimePolicyKeyLatest, 
+                       _kSimDeviceRuntimePolicyKeyNewest, _kSimDeviceRuntimePolicyKeyPinnedToBuild, 
+                       _kSimDeviceRuntimePolicyKeyPinnedToPath, _kSimDeviceRuntimePolicyKeySystem, 
+                       _kSimPlatformIdentifierPhone, _kSimPlatformIdentifierTV, _kSimPlatformIdentifierWatch, 
+                       _kSimPlatformIdentifierXR ]
+    objc-classes:    [ SimDevice, SimDeviceBootInfo, SimDeviceDataMigrationPluginResult, 
+                       SimDeviceIO, SimDeviceNotificationManager, SimDevicePair, 
+                       SimDeviceSet, SimDeviceType, SimDiskCryptexAuthenticationMethodInfo, 
+                       SimDiskImage, SimDiskImageIdentifier, SimDiskImageManager, 
+                       SimDiskImageRuntimeInfo, SimDiskUnmountRecord, SimIdentityClient, 
+                       SimIdentityDevice, SimIdentityManager, SimKnownSDKEntry, SimLaunchHostClient, 
+                       SimLaunchHostConnection, SimLibLaunchInstance, SimNearbyDevice, 
+                       SimNearbyDeviceManager, SimNearbyPeer, SimNotificationManager, 
+                       SimNotificationManagerToken, SimPendingOperation, SimPlatformInfo, 
+                       SimProfileBundle, SimProfileModTime, SimRuntime, SimRuntimeMapData, 
+                       SimRuntimePairingRequirements, SimSDKInfo, SimSelectedRuntimePolicyResult, 
+                       SimServiceContext, SimUsageTracker, SimVolumeManager, SimVolumeManagerNotification, 
+                       _SimDeallocSentinel ]
+...

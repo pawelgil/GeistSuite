@@ -1,4 +1,5 @@
 #import "PickerControls.h"
+#import "LiquidGlassCompat.h"
 
 #import <UIKit/UIKit.h>
 
@@ -45,8 +46,17 @@
 
 - (instancetype)initWithSize:(CGFloat)size {
     if ((self = [super initWithFrame:CGRectZero])) {
-        UIGlassEffect *effect = [UIGlassEffect effectWithStyle:UIGlassEffectStyleClear];
-        effect.tintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+        UIVisualEffect *effect;
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
+        if (HostSupportsGlassEffect()) {
+            UIGlassEffect *glass = [UIGlassEffect effectWithStyle:UIGlassEffectStyleClear];
+            glass.tintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+            effect = glass;
+        } else
+#endif
+        {
+            effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+        }
         _glass = [[UIVisualEffectView alloc] initWithEffect:effect];
         _glass.translatesAutoresizingMaskIntoConstraints = NO;
         _glass.userInteractionEnabled = NO;

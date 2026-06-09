@@ -1,6 +1,7 @@
 #import "BroadcastSheet.h"
 #import "PickerCells.h"
 #import "PickerControls.h"
+#import "LiquidGlassCompat.h"
 #import "FakeIsCaptured.h"
 #import "HostAppInfo.h"
 #import "HostControl.h"
@@ -9,21 +10,6 @@
 
 #import <UIKit/UIKit.h>
 #include <stdatomic.h>
-
-static BOOL HostSupportsGlassEffect(void) {
-    static BOOL cached;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        if (!NSClassFromString(@"UIGlassEffect")) {
-            cached = NO;
-            return;
-        }
-        NSNumber *optOut = [[NSBundle mainBundle]
-            objectForInfoDictionaryKey:@"UIDesignRequiresCompatibility"];
-        cached = !(optOut && [optOut boolValue]);
-    });
-    return cached;
-}
 
 @interface GCPaddedLabel : UILabel
 @property (nonatomic, assign) UIEdgeInsets textInsets;
@@ -201,11 +187,14 @@ static UIWindow *gBroadcastSheetWindow = nil;
     tv.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIVisualEffect *bgEffect;
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
     if (HostSupportsGlassEffect()) {
         UIGlassEffect *glass = [UIGlassEffect effectWithStyle:UIGlassEffectStyleClear];
         glass.tintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
         bgEffect = glass;
-    } else {
+    } else
+#endif
+    {
         bgEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
     }
     UIVisualEffectView *glassBg = [[UIVisualEffectView alloc] initWithEffect:bgEffect];
