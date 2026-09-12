@@ -236,7 +236,7 @@ public actor GeistBroadcastSession {
         transition(to: .listening)
         spawnAcceptLoop()
         spawnFrameAcceptLoop()
-        lastMicAuth = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        lastMicAuth = isMacOSMicAuthorized
         micAuthPollTask = Task { [weak self] in await self?.pollMicAuth() }
         let bundle = hostBundleID, path = socketPath
         log.notice("[Session \(bundle)] start: listening at \(path)")
@@ -434,6 +434,32 @@ public actor GeistBroadcastSession {
         videoSource = nil
     }
 
+    /// Host mic TCC only gates `.systemMicrophone` — a file or custom
+    /// producer never touches the real microphone, so it's always available.
+    private var isMacOSMicAuthorized: Bool {
+        switch micAudio {
+        case .systemMicrophone:
+            AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        case .mediaFile, .custom:
+            true
+        case .disabled:
+            false
+        }
+    }
+
+    /// Whether the picker's mic toggle should start on without the user
+    /// tapping it. Only true for sources with no privacy-sensitive consent
+    /// to gate — `.systemMicrophone` keeps defaulting off even when
+    /// authorized, so a human still opts in to sharing their real voice.
+    private var isMicEnabledByDefault: Bool {
+        switch micAudio {
+        case .mediaFile, .custom:
+            true
+        case .systemMicrophone, .disabled:
+            false
+        }
+    }
+
     private func attachMicSource() {
         guard micSource == nil else { return }
         let source: (any BroadcastSource)?
@@ -603,11 +629,11 @@ public actor GeistBroadcastSession {
             log.notice("[Session \(self.hostBundleID)] helloHost fd=\(fd) recording=\(!self.activeBroadcasts.isEmpty)")
             hostFD = fd
             let currentBroadcast = activeBroadcasts.first
-            let micAuthorized = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
             send(.state(recording: currentBroadcast != nil,
                         broadcast: currentBroadcast,
                         micEnabled: micSource != nil,
-                        macOSMicAuthorized: micAuthorized),
+                        macOSMicAuthorized: isMacOSMicAuthorized,
+                        micEnabledByDefault: isMicEnabledByDefault),
                  to: fd)
 
         case .helloExtension(let extensionBundleID):
@@ -732,7 +758,7 @@ public actor GeistBroadcastSession {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(2))
             if Task.isCancelled { return }
-            let current = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+            let current = isMacOSMicAuthorized
             if current != lastMicAuth {
                 lastMicAuth = current
                 let bundle = hostBundleID
@@ -742,7 +768,8 @@ public actor GeistBroadcastSession {
                     send(.state(recording: currentBroadcast != nil,
                                 broadcast: currentBroadcast,
                                 micEnabled: micSource != nil,
-                                macOSMicAuthorized: current),
+                                macOSMicAuthorized: current,
+                                micEnabledByDefault: isMicEnabledByDefault),
                          to: hostFD)
                 }
             }

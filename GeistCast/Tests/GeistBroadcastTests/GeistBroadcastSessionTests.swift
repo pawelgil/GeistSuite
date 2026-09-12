@@ -68,7 +68,7 @@ import Testing
         try sendMessage(.helloHost, to: fd)
         let reply = try await readWireMessage(from: fd)
 
-        if case .state(let recording, let broadcast, let micEnabled, _) = reply {
+        if case .state(let recording, let broadcast, let micEnabled, _, _) = reply {
             #expect(recording == false)
             #expect(broadcast == nil)
             #expect(micEnabled == false)

@@ -57,7 +57,7 @@ struct WireDecoderTests {
 
         #expect(messages == [
             .state(recording: true, broadcast: referenceBroadcast,
-                   micEnabled: false, macOSMicAuthorized: true)
+                   micEnabled: false, macOSMicAuthorized: true, micEnabledByDefault: false)
         ])
     }
 
@@ -71,7 +71,7 @@ struct WireDecoderTests {
 
         #expect(messages == [
             .state(recording: true, broadcast: referenceBroadcast,
-                   micEnabled: true, macOSMicAuthorized: true)
+                   micEnabled: true, macOSMicAuthorized: true, micEnabledByDefault: false)
         ])
     }
 
@@ -83,7 +83,7 @@ struct WireDecoderTests {
 
         #expect(messages == [
             .state(recording: false, broadcast: nil,
-                   micEnabled: false, macOSMicAuthorized: true)
+                   micEnabled: false, macOSMicAuthorized: true, micEnabledByDefault: false)
         ])
     }
 
@@ -97,7 +97,21 @@ struct WireDecoderTests {
 
         #expect(messages == [
             .state(recording: false, broadcast: nil,
-                   micEnabled: false, macOSMicAuthorized: false)
+                   micEnabled: false, macOSMicAuthorized: false, micEnabledByDefault: false)
+        ])
+    }
+
+    @Test
+    func feed_stateLineWithMicEnabledByDefault_yieldsStateMicEnabledByDefaultTrue() {
+        var sut = WireDecoder()
+
+        let messages = sut.feed(line(
+            #"{"type":"state","recording":false,"macOSMicAuthorized":true,"micEnabledByDefault":true}"#
+        ))
+
+        #expect(messages == [
+            .state(recording: false, broadcast: nil,
+                   micEnabled: false, macOSMicAuthorized: true, micEnabledByDefault: true)
         ])
     }
 
@@ -246,11 +260,11 @@ private extension WireMessage {
         .helloHost,
         .helloExtension(extensionBundleID: "com.ext"),
         .state(recording: true, broadcast: makeBroadcast(),
-               micEnabled: true, macOSMicAuthorized: true),
+               micEnabled: true, macOSMicAuthorized: true, micEnabledByDefault: false),
         .state(recording: true, broadcast: makeBroadcast(),
-               micEnabled: false, macOSMicAuthorized: false),
+               micEnabled: false, macOSMicAuthorized: false, micEnabledByDefault: false),
         .state(recording: false, broadcast: nil,
-               micEnabled: false, macOSMicAuthorized: true),
+               micEnabled: false, macOSMicAuthorized: true, micEnabledByDefault: true),
         .userPressedStart(micEnabled: false),
         .userPressedStop,
         .begin(makeBroadcast()),

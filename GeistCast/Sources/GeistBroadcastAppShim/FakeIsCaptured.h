@@ -12,6 +12,13 @@ void GC_InstallIsCapturedSwizzle(void);
 BOOL GC_MicEnabled(void);
 void GC_SetMicEnabled(BOOL enabled);
 
+// What a fresh (non-recording) handshake or a just-ended broadcast should
+// reset the mic toggle to — true only when the daemon's active
+// MicAudioConfig doesn't depend on host mic permission (media-file/custom
+// sources), false for systemMicrophone so a human still opts in.
+BOOL GC_MicEnabledByDefault(void);
+void GC_SetMicEnabledByDefault(BOOL enabled);
+
 // macOS-side TCC mic permission, as last reported by the daemon's state
 // envelope. Defaults to YES so we don't surface a warning before the
 // handshake completes.

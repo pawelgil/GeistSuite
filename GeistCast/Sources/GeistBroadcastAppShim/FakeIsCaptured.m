@@ -44,6 +44,7 @@
 static atomic_bool gFakeCaptured = false;
 static atomic_bool gMicEnabled = false;
 static atomic_bool gMacOSMicAuthorized = true;
+static atomic_bool gMicEnabledByDefault = false;
 static NSDate *gRecordingStartDate = nil;
 static os_unfair_lock gRecordingStartDateLock = OS_UNFAIR_LOCK_INIT;
 
@@ -65,6 +66,14 @@ void GC_SetMicEnabled(BOOL enabled) {
 
 BOOL GC_MacOSMicAuthorized(void) {
     return atomic_load(&gMacOSMicAuthorized);
+}
+
+BOOL GC_MicEnabledByDefault(void) {
+    return atomic_load(&gMicEnabledByDefault);
+}
+
+void GC_SetMicEnabledByDefault(BOOL enabled) {
+    atomic_store(&gMicEnabledByDefault, enabled);
 }
 
 void GC_SetMacOSMicAuthorized(BOOL authorized) {

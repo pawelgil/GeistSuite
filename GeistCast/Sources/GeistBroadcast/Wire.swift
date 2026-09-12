@@ -125,7 +125,7 @@ enum WireMessage: Equatable, Sendable {
     case broadcastEnded(Broadcast)
     case helloHost
     case helloExtension(extensionBundleID: String)
-    case state(recording: Bool, broadcast: Broadcast?, micEnabled: Bool, macOSMicAuthorized: Bool)
+    case state(recording: Bool, broadcast: Broadcast?, micEnabled: Bool, macOSMicAuthorized: Bool, micEnabledByDefault: Bool)
     case userPressedStart(micEnabled: Bool)
     case userCancelledStart
     case userPressedStop
@@ -223,11 +223,13 @@ struct WireDecoder {
         guard let recording = json["recording"] as? Bool else { return nil }
         let micEnabled = json["micEnabled"] as? Bool ?? false
         let macOSMicAuthorized = json["macOSMicAuthorized"] as? Bool ?? true
+        let micEnabledByDefault = json["micEnabledByDefault"] as? Bool ?? false
         return .state(
             recording: recording,
             broadcast: recording ? extractBroadcast(json) : nil,
             micEnabled: micEnabled,
-            macOSMicAuthorized: macOSMicAuthorized
+            macOSMicAuthorized: macOSMicAuthorized,
+            micEnabledByDefault: micEnabledByDefault
         )
     }
 
@@ -271,11 +273,12 @@ struct WireEncoder {
             return ["type": "hello", "role": "host"]
         case .helloExtension(let bundleID):
             return ["type": "hello", "role": "extension", "extensionBundleID": bundleID]
-        case .state(let recording, let broadcast, let micEnabled, let macOSMicAuthorized):
+        case .state(let recording, let broadcast, let micEnabled, let macOSMicAuthorized, let micEnabledByDefault):
             var obj: [String: Any] = [
                 "type": "state",
                 "recording": recording,
                 "macOSMicAuthorized": macOSMicAuthorized,
+                "micEnabledByDefault": micEnabledByDefault,
             ]
             if recording, let b = broadcast {
                 obj["simulatorUDID"] = b.simulatorUDID

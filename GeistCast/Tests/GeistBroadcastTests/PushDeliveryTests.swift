@@ -164,7 +164,7 @@ import Testing
         try sendMessage(.helloHost, to: freshHostFD)
         let reply = try await readWireMessage(from: freshHostFD)
 
-        if case .state(let recording, let replyBroadcast, let micEnabled, _) = reply {
+        if case .state(let recording, let replyBroadcast, let micEnabled, _, _) = reply {
             #expect(recording == true)
             #expect(replyBroadcast == broadcast)
             #expect(micEnabled == true)
@@ -215,10 +215,93 @@ import Testing
         try sendMessage(.helloHost, to: freshHostFD)
         let reply = try await readWireMessage(from: freshHostFD)
 
-        if case .state(let recording, let replyBroadcast, let micEnabled, _) = reply {
+        if case .state(let recording, let replyBroadcast, let micEnabled, _, _) = reply {
             #expect(recording == true)
             #expect(replyBroadcast == broadcast)
             #expect(micEnabled == false)
+        } else {
+            Issue.record("expected state reply, got \(reply)")
+        }
+
+        await sut.stop()
+    }
+
+    @Test
+    func helloHost_withMicAudioDisabled_repliesMacOSMicAuthorizedFalseAndMicEnabledByDefaultFalse() async throws {
+        let sut = createSUT(micAudio: .disabled)
+        try await sut.start()
+        let fd = try connectClient(toSocketOf: sut)
+        defer { close(fd) }
+
+        try sendMessage(.helloHost, to: fd)
+        let reply = try await readWireMessage(from: fd)
+
+        if case .state(_, _, _, let macOSMicAuthorized, let micEnabledByDefault) = reply {
+            #expect(macOSMicAuthorized == false)
+            #expect(micEnabledByDefault == false)
+        } else {
+            Issue.record("expected state reply, got \(reply)")
+        }
+
+        await sut.stop()
+    }
+
+    @Test
+    func helloHost_withMediaFileMicAudio_repliesMacOSMicAuthorizedTrueAndMicEnabledByDefaultTrue() async throws {
+        let sut = createSUT(micAudio: .mediaFile(URL(fileURLWithPath: "/tmp/fake-stub.mp4")))
+        try await sut.start()
+        let fd = try connectClient(toSocketOf: sut)
+        defer { close(fd) }
+
+        try sendMessage(.helloHost, to: fd)
+        let reply = try await readWireMessage(from: fd)
+
+        if case .state(_, _, _, let macOSMicAuthorized, let micEnabledByDefault) = reply {
+            #expect(macOSMicAuthorized == true)
+            #expect(micEnabledByDefault == true)
+        } else {
+            Issue.record("expected state reply, got \(reply)")
+        }
+
+        await sut.stop()
+    }
+
+    @Test
+    func helloHost_withCustomMicAudio_repliesMacOSMicAuthorizedTrueAndMicEnabledByDefaultTrue() async throws {
+        let sut = createSUT(micAudio: .custom(OneShotMicAudioProducer(
+            buffer: makePCMBuffer(sampleRate: 44100, channels: 1, frameCount: 1024)
+        )))
+        try await sut.start()
+        let fd = try connectClient(toSocketOf: sut)
+        defer { close(fd) }
+
+        try sendMessage(.helloHost, to: fd)
+        let reply = try await readWireMessage(from: fd)
+
+        if case .state(_, _, _, let macOSMicAuthorized, let micEnabledByDefault) = reply {
+            #expect(macOSMicAuthorized == true)
+            #expect(micEnabledByDefault == true)
+        } else {
+            Issue.record("expected state reply, got \(reply)")
+        }
+
+        await sut.stop()
+    }
+
+    @Test
+    func helloHost_withSystemMicrophoneMicAudio_repliesMacOSMicAuthorizedMatchingLiveStatusAndMicEnabledByDefaultFalse() async throws {
+        let sut = createSUT(micAudio: .systemMicrophone)
+        try await sut.start()
+        let fd = try connectClient(toSocketOf: sut)
+        defer { close(fd) }
+
+        try sendMessage(.helloHost, to: fd)
+        let reply = try await readWireMessage(from: fd)
+
+        let expectedAuthorized = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        if case .state(_, _, _, let macOSMicAuthorized, let micEnabledByDefault) = reply {
+            #expect(macOSMicAuthorized == expectedAuthorized)
+            #expect(micEnabledByDefault == false)
         } else {
             Issue.record("expected state reply, got \(reply)")
         }

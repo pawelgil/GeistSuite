@@ -68,13 +68,18 @@ void GC_HandshakeHost(NSMutableData *carryOver) {
     BOOL micAuth = msg[@"macOSMicAuthorized"]
         ? [msg[@"macOSMicAuthorized"] boolValue] : YES;
     GC_SetMacOSMicAuthorized(micAuth);
+    // Absent (older daemons) means "no config-driven default" — preserves
+    // today's unconditional off.
+    BOOL micDefaultOn = msg[@"micEnabledByDefault"]
+        ? [msg[@"micEnabledByDefault"] boolValue] : NO;
+    GC_SetMicEnabledByDefault(micDefaultOn);
 
     BOOL recording = [msg[@"recording"] boolValue];
     if (!recording) {
-        GC_LOG("state reply recording=NO macOSMicAuthorized=%d", micAuth);
+        GC_LOG("state reply recording=NO macOSMicAuthorized=%d micEnabledByDefault=%d", micAuth, micDefaultOn);
         GC_SetFakeCaptured(NO);
         GC_SetRecordingStartDate(nil);
-        GC_SetMicEnabled(NO);
+        GC_SetMicEnabled(micDefaultOn);
         return;
     }
     NSString *iso = msg[@"startedAt"];
@@ -106,7 +111,7 @@ static void readMessages(NSMutableData *carryOver) {
             } else if ([type isEqual:@"ended"]) {
                 GC_SetFakeCaptured(NO);
                 GC_SetRecordingStartDate(nil);
-                GC_SetMicEnabled(NO);
+                GC_SetMicEnabled(GC_MicEnabledByDefault());
                 GC_LOG("host reader: broadcast ended");
                 GC_PostScreenCapturedChange();
             } else if ([type isEqual:@"state"]) {
@@ -116,6 +121,9 @@ static void readMessages(NSMutableData *carryOver) {
                 BOOL micAuth = msg[@"macOSMicAuthorized"]
                     ? [msg[@"macOSMicAuthorized"] boolValue] : YES;
                 GC_SetMacOSMicAuthorized(micAuth);
+                if (msg[@"micEnabledByDefault"]) {
+                    GC_SetMicEnabledByDefault([msg[@"micEnabledByDefault"] boolValue]);
+                }
                 GC_LOG("host reader: state push macOSMicAuthorized=%d", micAuth);
             }
         }
