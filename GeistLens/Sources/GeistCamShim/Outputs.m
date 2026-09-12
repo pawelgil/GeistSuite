@@ -363,13 +363,17 @@ static BOOL swiz_conn_isVideoRotationAngleSupported(id self, SEL _cmd, double an
     return angle == 0.0 || angle == 90.0 || angle == 180.0 || angle == 270.0;
 }
 
+static const void *kGeistCamActiveFormatKey = &kGeistCamActiveFormatKey;
+
 static IMP s_origDeviceSetActiveFormat;
 static void swiz_device_setActiveFormat(id self, SEL _cmd, id format, BOOL reset, NSString *preset) {
-    if (s_origDeviceSetActiveFormat) {
-        ((void(*)(id, SEL, id, BOOL, NSString *))s_origDeviceSetActiveFormat)(self, _cmd, format, reset, preset);
-    }
     if (!format) return;
     if (![self isKindOfClass:[AVCaptureDevice class]]) return;
+    // Skip original — FigCaptureSessionSimulator errors on this call (err=-12782),
+    // which AVF surfaces to apps ~150-220ms later as a runtime error notification.
+    // We own the contract end-to-end, same as Session.m; the paired activeFormat
+    // getter below keeps reads consistent with what was set.
+    objc_setAssociatedObject(self, kGeistCamActiveFormatKey, format, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSString *uid = [(AVCaptureDevice *)self uniqueID];
     if (!uid) return;
     SEL fdSel = @selector(formatDescription);
@@ -381,6 +385,14 @@ static void swiz_device_setActiveFormat(id self, SEL _cmd, id format, BOOL reset
     CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
     OSType pixfmt = CMFormatDescriptionGetMediaSubType(desc);
     activeFormatRecord(uid, dims.width, dims.height, pixfmt);
+}
+
+static IMP s_origDeviceActiveFormat;
+static id swiz_device_activeFormat(id self, SEL _cmd) {
+    id recorded = objc_getAssociatedObject(self, kGeistCamActiveFormatKey);
+    if (recorded) return recorded;
+    if (s_origDeviceActiveFormat) return ((id(*)(id, SEL))s_origDeviceActiveFormat)(self, _cmd);
+    return nil;
 }
 
 static float swiz_format_maxZoomFactor(id self, SEL _cmd) {
@@ -408,6 +420,8 @@ void installCapabilitySwizzles(void) {
     swizzleMethod(@"AVCaptureFigVideoDevice",
                   NSSelectorFromString(@"_setActiveFormat:resetVideoZoomFactorAndMinMaxFrameDurations:sessionPreset:"),
                   (IMP)swiz_device_setActiveFormat, &s_origDeviceSetActiveFormat);
+    swizzleMethod(@"AVCaptureFigVideoDevice", @selector(activeFormat),
+                  (IMP)swiz_device_activeFormat, &s_origDeviceActiveFormat);
     swizzleMethod(@"FigCaptureSourceVideoFormat", @selector(maxZoomFactor),
                   (IMP)swiz_format_maxZoomFactor, NULL);
     swizzleMethod(@"AVCaptureConnection", @selector(isVideoOrientationSupported),

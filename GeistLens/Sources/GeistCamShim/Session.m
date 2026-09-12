@@ -13,6 +13,7 @@ static IMP s_origStartRunning;
 static IMP s_origStopRunning;
 static IMP s_origIsRunning;
 static IMP s_origCommitConfiguration;
+static IMP s_origPostNotificationNameObjectUserInfo;
 static volatile BOOL s_appBackgrounded;
 
 BOOL isSessionRunning(AVCaptureSession *sess) {
@@ -79,6 +80,20 @@ static void swiz_commitConfiguration(id self, SEL _cmd) {
     metadataInvalidateDemand();
 }
 
+// setSessionPreset: resolves synchronously outside commitConfiguration, so Fig
+// still signals err=-12782 there despite the skips above. Drop the notification
+// at the one choke point every poster and observer share — on the Simulator's
+// synthetic pipeline it never reflects a real capture failure.
+static void swiz_postNotificationNameObjectUserInfo(id self, SEL _cmd, NSString *name, id object, NSDictionary *userInfo) {
+    if ([name isEqualToString:AVCaptureSessionRuntimeErrorNotification]) {
+        geistcam_debugf("suppressed AVCaptureSessionRuntimeErrorNotification (Fig simulator artifact)");
+        return;
+    }
+    if (s_origPostNotificationNameObjectUserInfo) {
+        ((void(*)(id, SEL, NSString *, id, NSDictionary *))s_origPostNotificationNameObjectUserInfo)(self, _cmd, name, object, userInfo);
+    }
+}
+
 void installSessionSwizzles(void) {
     swizzleMethod(@"AVCaptureSession", @selector(startRunning),
                   (IMP)swiz_startRunning, &s_origStartRunning);
@@ -88,6 +103,8 @@ void installSessionSwizzles(void) {
                   (IMP)swiz_isRunning, &s_origIsRunning);
     swizzleMethod(@"AVCaptureSession", @selector(commitConfiguration),
                   (IMP)swiz_commitConfiguration, &s_origCommitConfiguration);
+    swizzleMethod(@"NSNotificationCenter", @selector(postNotificationName:object:userInfo:),
+                  (IMP)swiz_postNotificationNameObjectUserInfo, &s_origPostNotificationNameObjectUserInfo);
 }
 
 // _setInterrupted:withReason:interruptor: deadlocks sim UI on iOS 26.x;
