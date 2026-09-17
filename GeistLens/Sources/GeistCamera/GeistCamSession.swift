@@ -370,19 +370,21 @@ public actor GeistCamSession: SessionDriving {
     }
 
     public func stop() {
+        state = .stopped
+        cleanUpConnection(client: client, inboundTask: inboundTask)
+    }
+
+    private func cleanUpConnection(client: SocketClient?, inboundTask: Task<Void, Never>?) {
         let active = runningProducers
         let prods = producers
         let media = Array(mediaSources.values)
-        let cl = client
-        let task = inboundTask
-        client = nil
-        inboundTask = nil
+        self.client = nil
+        self.inboundTask = nil
         runningProducers.removeAll()
-        state = .stopped
         for slot in active { prods[slot]?.stop() }
         for reg in media { stopMediaSource(reg) }
-        task?.cancel()
-        cl?.close()
+        inboundTask?.cancel()
+        client?.close()
         stopStreamingWatchdog()
     }
 
@@ -517,7 +519,7 @@ public actor GeistCamSession: SessionDriving {
             }
         }
         let hello = WireHello(slots: slots)
-        client.send(Data.framed(.hello, payload: hello.encoded()))
+        _ = client.send(.reliable(type: .hello, payload: hello.encoded()))
     }
 
     private func startInboundTask(client: SocketClient) {
@@ -525,7 +527,7 @@ public actor GeistCamSession: SessionDriving {
             for await msg in client.inbound {
                 await self?.handleInbound(msg)
             }
-            await self?.handleDisconnected()
+            await self?.handleDisconnected(client: client)
         }
     }
 
@@ -680,7 +682,7 @@ public actor GeistCamSession: SessionDriving {
 
     private func sendMetadataResults(_ results: WireMetadataResults) {
         guard let client else { return }
-        client.send(Data.framed(.metadataResults, payload: results.encoded()))
+        _ = client.send(.reliable(type: .metadataResults, payload: results.encoded()))
     }
 
     private func stopProducer(_ producer: AnyProducer, for slot: CameraSlot) {
@@ -690,15 +692,11 @@ public actor GeistCamSession: SessionDriving {
         log.notice("stopped producer for \(slot.debugLabel)")
     }
 
-    private func handleDisconnected() {
-        let active = runningProducers
-        let prods = producers
-        let media = Array(mediaSources.values)
-        runningProducers.removeAll()
-        state = .stopped
-        for slot in active { prods[slot]?.stop() }
-        for reg in media { stopMediaSource(reg) }
-        stopStreamingWatchdog()
+    private func handleDisconnected(client disconnectedClient: SocketClient) {
+        if client === disconnectedClient {
+            state = .stopped
+            cleanUpConnection(client: disconnectedClient, inboundTask: inboundTask)
+        }
         delegate?.sessionDidDisconnect(self)
     }
 

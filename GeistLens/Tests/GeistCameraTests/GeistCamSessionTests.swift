@@ -2,11 +2,81 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import Foundation
+import Synchronization
 import Testing
 @testable import GeistCamera
 
 @Suite("GeistCamSession")
 struct GeistCamSessionTests {
+    @Test func peerEOF_withActiveProducer_stopsProducerAndClosesClient() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let source = MediaSourceSpy()
+
+        let delegate = SessionDelegateSpy()
+        let session = GeistCamSession(socketPath: server.socketPath, delegate: delegate)
+        try await session.attachMediaSource(source, video: .backCamera, audio: nil)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+        server.send(.helloAck, payload: makeHelloAckPayload(version: 1, initial: [1, 0, 0]))
+        #expect(await source.waitForStart())
+
+        #expect(server.finishSending())
+        #expect(await server.waitForClientClose())
+        #expect(await delegate.waitForDisconnect())
+
+        #expect(source.stopCallCount == 1)
+        #expect(await session.state == .stopped)
+        #expect(delegate.disconnectCallCount == 1)
+    }
+
+    @Test func stop_whenConnected_notifiesAfterInboundCompletionOnce() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+
+        let delegate = SessionDelegateSpy()
+        let session = GeistCamSession(socketPath: server.socketPath, delegate: delegate)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+
+        await session.stop()
+        #expect(await server.waitForClientClose())
+        #expect(await delegate.waitForDisconnect())
+
+        #expect(delegate.disconnectCallCount == 1)
+    }
+
+    @Test func stop_racingPeerEOF_stopsProducerAndNotifiesOnce() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let source = MediaSourceSpy()
+
+        let delegate = SessionDelegateSpy()
+        let session = GeistCamSession(socketPath: server.socketPath, delegate: delegate)
+        try await session.attachMediaSource(source, video: .backCamera, audio: nil)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+        server.send(.helloAck, payload: makeHelloAckPayload(version: 1, initial: [1, 0, 0]))
+        #expect(await source.waitForStart())
+
+        #expect(server.finishSending())
+        await session.stop()
+        #expect(await server.waitForClientClose())
+        #expect(await delegate.waitForDisconnect())
+
+        #expect(source.stopCallCount == 1)
+        #expect(delegate.disconnectCallCount == 1)
+    }
+
+    @Test func stop_whenNeverConnected_doesNotNotify() async {
+        let delegate = SessionDelegateSpy()
+        let session = GeistCamSession(socketPath: TestFeederServer.uniqueSocketPath(), delegate: delegate)
+
+        await session.stop()
+
+        #expect(delegate.disconnectCallCount == 0)
+    }
+
     @Test func start_afterAttachingMediaSource_sendsHelloToServer() async throws {
         let server = try TestFeederServer.listen()
         defer { server.close() }
@@ -140,6 +210,45 @@ private func makeActiveFormatPayload(slot: UInt32, width: UInt32, height: UInt32
 
 // MARK: - Test Doubles
 
+private final class SessionDelegateSpy: GeistCamSessionDelegate, Sendable {
+    private let disconnectContinuation: AsyncStream<Void>.Continuation
+    private let disconnects: AsyncStream<Void>
+    private let state = Mutex(0)
+
+    init() {
+        let (disconnects, continuation) = AsyncStream<Void>.makeStream()
+        self.disconnects = disconnects
+        self.disconnectContinuation = continuation
+    }
+
+    var disconnectCallCount: Int {
+        state.withLock { $0 }
+    }
+
+    func sessionDidDisconnect(_: GeistCamSession) {
+        state.withLock { count in
+            count += 1
+        }
+        disconnectContinuation.yield()
+    }
+
+    func waitForDisconnect(timeout: TimeInterval = 2.0) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { [disconnects] in
+                for await _ in disconnects { return true }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeout))
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+}
+
 private final class MediaSourceSpy: MediaSource, @unchecked Sendable {
     let hasVideo = true
     let hasAudio = false
@@ -149,10 +258,18 @@ private final class MediaSourceSpy: MediaSource, @unchecked Sendable {
     let declaredAudioFormat: AudioSlotFormat? = nil
 
     private let lock = NSLock()
+    private let startContinuation: AsyncStream<Void>.Continuation
+    private let starts: AsyncStream<Void>
     private var _startCount = 0
     private var _stopCount = 0
     private var _reformatCount = 0
     private var _lastReformat: VideoSlotFormat?
+
+    init() {
+        let (starts, continuation) = AsyncStream<Void>.makeStream()
+        self.starts = starts
+        self.startContinuation = continuation
+    }
 
     var startCallCount: Int { lock.lock(); defer { lock.unlock() }; return _startCount }
     var stopCallCount: Int { lock.lock(); defer { lock.unlock() }; return _stopCount }
@@ -162,6 +279,7 @@ private final class MediaSourceSpy: MediaSource, @unchecked Sendable {
     func start(into sink: any MediaSink) throws {
         lock.lock(); defer { lock.unlock() }
         _startCount += 1
+        startContinuation.yield()
     }
 
     func stop() {
@@ -173,5 +291,21 @@ private final class MediaSourceSpy: MediaSource, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         _reformatCount += 1
         _lastReformat = target
+    }
+
+    func waitForStart(timeout: TimeInterval = 2.0) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { [starts] in
+                for await _ in starts { return true }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeout))
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
     }
 }

@@ -12,12 +12,16 @@ struct VideoSlotBoundSinkTests {
         return pb!
     }
 
-    private static func makeSink(expected: PixelFormat, client: any FrameTransport) -> VideoSlotBoundSink {
+    private static func makeSink(
+        expected: PixelFormat,
+        client: any FrameTransport,
+        heartbeat: FrameHeartbeat = FrameHeartbeat()
+    ) -> VideoSlotBoundSink {
         VideoSlotBoundSink(
             wireIndex: 0,
             declaredFormat: VideoSlotFormat(width: 16, height: 16, pixelFormat: expected, fps: 30),
             client: client,
-            heartbeat: FrameHeartbeat()
+            heartbeat: heartbeat
         )
     }
 
@@ -63,6 +67,17 @@ struct VideoSlotBoundSinkTests {
 
         #expect(spy.sentFrames.isEmpty)
     }
+
+    @Test func sendVideo_transportDropsFrame_doesNotMarkHeartbeat() {
+        let stub = FrameTransportDropStub()
+        let heartbeat = FrameHeartbeat()
+        let sink = Self.makeSink(expected: .yuv420FullRange, client: stub, heartbeat: heartbeat)
+
+        sink.sendVideo(Self.makePixelBuffer(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+                       pts: .zero, duration: .zero)
+
+        #expect(heartbeat.read() == 0)
+    }
 }
 
 // MARK: - Test Doubles
@@ -76,8 +91,15 @@ private final class FrameTransportSpy: FrameTransport, @unchecked Sendable {
         return frames
     }
 
-    func send(_ frame: Data) {
+    func send(_ frame: OutboundFrame) -> FrameAdmission {
         lock.lock(); defer { lock.unlock() }
-        frames.append(frame)
+        frames.append(frame.encoded)
+        return .accepted
+    }
+}
+
+private struct FrameTransportDropStub: FrameTransport {
+    func send(_: OutboundFrame) -> FrameAdmission {
+        .droppedVideo
     }
 }

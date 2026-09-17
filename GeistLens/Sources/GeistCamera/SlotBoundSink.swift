@@ -8,7 +8,7 @@ import GeistKit
 /// The lib's frame egress. `SocketClient` is the production conformer; tests
 /// substitute a spy to capture what a sink emits.
 protocol FrameTransport: Sendable {
-    func send(_ frame: Data)
+    func send(_ frame: OutboundFrame) -> FrameAdmission
 }
 
 private let validationLock = Mutex<Set<UInt32>>([])
@@ -94,12 +94,13 @@ final class VideoSlotBoundSink: VideoFrameSink {
         )
         var payload = header.encoded()
         payload.append(bytes)
-        client.send(Data.framed(.videoFrame, payload: payload))
-        heartbeat.mark()
+        if client.send(.video(slot: wireIndex, payload: payload)) == .accepted {
+            heartbeat.mark()
+        }
     }
 }
 
-final class AudioSlotBoundSink: AudioFrameSink {
+final class AudioSlotBoundSink: AudioFrameAdmissionReporting {
     let wireIndex: UInt32
     let declaredFormat: AudioSlotFormat
     private let client: any FrameTransport
@@ -113,16 +114,25 @@ final class AudioSlotBoundSink: AudioFrameSink {
     }
 
     func sendAudio(_ samples: AVAudioPCMBuffer, pts: CMTime) {
+        _ = sendAudioReportingAdmission(samples, pts: pts)
+    }
+
+    func sendAudioReportingAdmission(
+        _ samples: AVAudioPCMBuffer,
+        pts: CMTime
+    ) -> AudioFrameAdmission {
         let asbd = samples.format.streamDescription.pointee
         let sampleRate = Int(asbd.mSampleRate)
         let channels = Int(asbd.mChannelsPerFrame)
         if sampleRate != declaredFormat.sampleRate || channels != declaredFormat.channels {
             warnOncePerSlot(wireIndex,
                 "audio mismatch — declared \(declaredFormat.sampleRate)Hz×\(declaredFormat.channels)ch, got \(sampleRate)Hz×\(channels)ch. Dropping.")
-            return
+            return .rejected(.invalidFormat)
         }
 
-        guard let raw = samples.floatChannelData?[0] else { return }
+        guard let raw = samples.floatChannelData?[0] else {
+            return .rejected(.invalidFormat)
+        }
         let frameCount = Int(samples.frameLength)
         let bytes = Data(bytes: raw, count: frameCount * channels * MemoryLayout<Float>.size)
 
@@ -138,8 +148,15 @@ final class AudioSlotBoundSink: AudioFrameSink {
         )
         var payload = header.encoded()
         payload.append(bytes)
-        client.send(Data.framed(.audioFrame, payload: payload))
-        heartbeat.mark()
+        switch client.send(.audio(slot: wireIndex, payload: payload)) {
+        case .accepted:
+            heartbeat.mark()
+            return .accepted
+        case .droppedVideo:
+            return .rejected(.unavailable)
+        case .rejected(let rejection):
+            return .rejected(rejection)
+        }
     }
 }
 
