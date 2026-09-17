@@ -412,16 +412,22 @@ private final class SpyDelegate: GeistBroadcastSessionDelegate, @unchecked Senda
 
 private final class StubStager: AppexStaging {
     func stage(appexAt sourcePath: String) async throws -> StagedAppex {
-        StagedAppex(binaryPath: "\(sourcePath)/staged/Binary")
+        StagedAppex(
+            binaryPath: "\(sourcePath)/staged/Binary",
+            rootOwner: StubStagedArtifactOwner()
+        )
     }
 }
 
 private final class StubSpawner: AppexSpawning {
-    func spawn(stagedBinary: String,
+    func spawn(stagedAppex: StagedAppex,
                simulatorUDID: String,
                simctlSetPath: String?,
-               environment: [String: String]) async throws {}
+               environment: [String: String]) async throws -> SpawnedAppex {
+        SpawnedAppex(binaryPath: stagedAppex.binaryPath, generation: UUID(), pid: 1)
+    }
     func killStale(stagedBinary: String) async {}
+    func terminate(_ process: SpawnedAppex) async {}
 }
 
 private final class GatedSpawner: AppexSpawning {
@@ -430,18 +436,21 @@ private final class GatedSpawner: AppexSpawning {
 
     func release() { gate.fire() }
 
-    func spawn(stagedBinary: String,
+    func spawn(stagedAppex: StagedAppex,
                simulatorUDID: String,
                simctlSetPath: String?,
-               environment: [String: String]) async throws {
+               environment: [String: String]) async throws -> SpawnedAppex {
         spawnEntered.fire()
         await gate.wait()
+        return SpawnedAppex(binaryPath: stagedAppex.binaryPath, generation: UUID(), pid: 1)
     }
     func killStale(stagedBinary: String) async {}
+    func terminate(_ process: SpawnedAppex) async {}
 }
+
+private final class StubStagedArtifactOwner: Sendable {}
 
 private final class SilentVideoProducer: VideoFrameProducer {
     func start(producing handler: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {}
     func stop() {}
 }
-

@@ -49,6 +49,44 @@ import Testing
     }
 
     @Test
+    func frameClient_WhenReplacementConnects_ClosesOldClientBeforeDeliveringFrames() async throws {
+        let buffer = try makeBGRAPixelBuffer(width: 4, height: 2, fill: 0x22)
+        let extensionConnected = AsyncSignal()
+        let delegate = SignalingDelegate(extensionConnected: extensionConnected)
+        let sut = createSUT(
+            videoCapture: .custom(OneShotVideoFrameProducer(buffer: buffer)),
+            delegate: delegate
+        )
+        try await sut.start()
+        let oldFrameFD = try connectFrameClient(toSocketOf: sut)
+        defer { close(oldFrameFD) }
+        let replacementFrameFD = try connectFrameClient(toSocketOf: sut)
+        defer { close(replacementFrameFD) }
+
+        await #expect(throws: SocketReadError.closed) {
+            try await readBytes(from: oldFrameFD, count: 1, timeoutSeconds: 2)
+        }
+
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        let extensionFD = try connectClient(toSocketOf: sut)
+        defer { close(extensionFD) }
+        try await driveUserPressedStart(
+            sut: sut,
+            hostFD: hostFD,
+            extFD: extensionFD,
+            extensionConnected: extensionConnected,
+            micEnabled: false
+        )
+
+        let header = try await readFrameHeader(from: replacementFrameFD)
+        _ = try await readBytes(from: replacementFrameFD, count: Int(header.payloadSize))
+        #expect(header.streamType == StreamType.video.rawValue)
+
+        await sut.stop()
+    }
+
+    @Test
     func userPressedStart_withCustomMicProducer_writesMicAudioFrameToFrameSocket() async throws {
         let buffer = makePCMBuffer(sampleRate: 44100, channels: 1, frameCount: 1024)
         let producer = OneShotMicAudioProducer(buffer: buffer)
@@ -499,15 +537,23 @@ private final class OneShotMicAudioProducer: MicAudioProducer, @unchecked Sendab
 
 private final class StubStager: AppexStaging {
     func stage(appexAt sourcePath: String) async throws -> StagedAppex {
-        StagedAppex(binaryPath: "\(sourcePath)/staged/Binary")
+        StagedAppex(
+            binaryPath: "\(sourcePath)/staged/Binary",
+            rootOwner: StubStagedArtifactOwner()
+        )
     }
 }
 
 private final class StubSpawner: AppexSpawning {
-    func spawn(stagedBinary: String, simulatorUDID: String,
-               simctlSetPath: String?, environment: [String: String]) async throws {}
+    func spawn(stagedAppex: StagedAppex, simulatorUDID: String,
+               simctlSetPath: String?, environment: [String: String]) async throws -> SpawnedAppex {
+        SpawnedAppex(binaryPath: stagedAppex.binaryPath, generation: UUID(), pid: 1)
+    }
     func killStale(stagedBinary: String) async {}
+    func terminate(_ process: SpawnedAppex) async {}
 }
+
+private final class StubStagedArtifactOwner: Sendable {}
 
 private final class SignalingDelegate: GeistBroadcastSessionDelegate {
     private let extensionConnected: AsyncSignal
@@ -528,4 +574,3 @@ private final class SilentVideoProducer: VideoFrameProducer {
     func start(producing handler: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {}
     func stop() {}
 }
-

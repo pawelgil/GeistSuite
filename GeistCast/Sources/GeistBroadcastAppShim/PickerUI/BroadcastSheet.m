@@ -70,6 +70,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
 - (void)dealloc {
     [_backdropBlurAnimator stopAnimation:YES];
     [_countdownTimer invalidate];
+    [_startupTimeoutTimer invalidate];
     [_durationTimer invalidate];
     if (_captureChangeObserver) {
         [[NSNotificationCenter defaultCenter] removeObserver:_captureChangeObserver];
@@ -104,6 +105,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
         _recordingStartTime = self.recordingStartedAt;
         [self startDurationTimer];
     }
+    [self installCaptureChangeObserver];
 
     UITapGestureRecognizer *tap =
         [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(backdropTapped)];
@@ -529,35 +531,45 @@ static UIWindow *gBroadcastSheetWindow = nil;
 - (void)enterStartingState {
     _isStarting = YES;
     [self applyRecordingState];
+    _startupTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:10.0
+                                                            target:self
+                                                          selector:@selector(startupTimedOut)
+                                                          userInfo:nil
+                                                           repeats:NO];
     if (self.onStartConfirmed) self.onStartConfirmed(_micEnabled);
+}
 
+- (void)installCaptureChangeObserver {
     __weak __typeof(self) weakSelf = self;
     _captureChangeObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:@"UIScreenCapturedDidChangeNotification"
                     object:nil
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *note) {
-        __typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (!GC_FakeCaptured()) return;
-        [strongSelf transitionStartingToRecording];
+        [weakSelf reconcileCaptureState];
     }];
+}
 
-    _startupTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:10.0
-                                                            target:self
-                                                          selector:@selector(startupTimedOut)
-                                                          userInfo:nil
-                                                           repeats:NO];
+- (void)reconcileCaptureState {
+    if (GC_FakeCaptured()) {
+        [self transitionStartingToRecording];
+        return;
+    }
+    if (!_recording && !_isStarting) return;
+
+    [_startupTimeoutTimer invalidate];
+    _startupTimeoutTimer = nil;
+    [self stopDurationTimer];
+    _isStarting = NO;
+    _recording = NO;
+    [self applyRecordingState];
+    [self refreshAppCell];
 }
 
 - (void)transitionStartingToRecording {
     if (!_isStarting) return;
     [_startupTimeoutTimer invalidate];
     _startupTimeoutTimer = nil;
-    if (_captureChangeObserver) {
-        [[NSNotificationCenter defaultCenter] removeObserver:_captureChangeObserver];
-        _captureChangeObserver = nil;
-    }
     _isStarting = NO;
     _recording = YES;
     [self applyRecordingState];
@@ -567,10 +579,6 @@ static UIWindow *gBroadcastSheetWindow = nil;
 
 - (void)startupTimedOut {
     if (!_isStarting) return;
-    if (_captureChangeObserver) {
-        [[NSNotificationCenter defaultCenter] removeObserver:_captureChangeObserver];
-        _captureChangeObserver = nil;
-    }
     _startupTimeoutTimer = nil;
     _isStarting = NO;
     [self applyRecordingState];

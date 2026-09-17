@@ -5,6 +5,16 @@ import SecurityPrivate
 
 struct StagedAppex: Sendable, Equatable {
     let binaryPath: String
+    private let rootOwner: any AnyObject & Sendable
+
+    init<RootOwner: AnyObject & Sendable>(binaryPath: String, rootOwner: RootOwner) {
+        self.binaryPath = binaryPath
+        self.rootOwner = rootOwner
+    }
+
+    static func == (lhs: StagedAppex, rhs: StagedAppex) -> Bool {
+        lhs.binaryPath == rhs.binaryPath
+    }
 }
 
 protocol AppexStaging: Sendable {
@@ -28,15 +38,31 @@ struct AppexStager: AppexStaging, Sendable {
 
     private let fileSystem: any FileSystem
     private let resigner: any BundleResigning
+    private let cleanupFailureReporter: StagedArtifactOwner.CleanupFailureReporter
 
-    init(fileSystem: any FileSystem = LiveFileSystem(),
-         resigner: any BundleResigning = LiveBundleResigner()) {
+    init(
+        fileSystem: any FileSystem = LiveFileSystem(),
+        resigner: any BundleResigning = LiveBundleResigner(),
+        cleanupFailureReporter: @escaping StagedArtifactOwner.CleanupFailureReporter = { path, error in
+            log.error("Staged appex cleanup failed at \(path): \(error)")
+        }
+    ) {
         self.fileSystem = fileSystem
         self.resigner = resigner
+        self.cleanupFailureReporter = cleanupFailureReporter
     }
 
     func stage(appexAt sourcePath: String) async throws -> StagedAppex {
-        let stagedAppex = "/tmp/geistcast-staged-appex-\(UUID().uuidString).appex"
+        try Task.checkCancellation()
+        let receipt = try fileSystem.claimOwnedDirectory(
+            named: "geistcast-staged-appex-\(UUID().uuidString)"
+        )
+        let rootOwner = StagedArtifactOwner(
+            fileSystem: fileSystem,
+            receipt: receipt,
+            cleanupFailureReporter: cleanupFailureReporter
+        )
+        let stagedAppex = "\(receipt.canonicalPath)/BroadcastExtension.appex"
         try fileSystem.copyItem(atPath: sourcePath, toPath: stagedAppex)
         let plist = try patchPackageType(at: stagedAppex)
         guard let executableName = plist["CFBundleExecutable"] as? String else {
@@ -44,7 +70,8 @@ struct AppexStager: AppexStaging, Sendable {
         }
         let binaryPath = "\(stagedAppex)/\(executableName)"
         try resigner.resign(bundleAt: stagedAppex, scrubbingKey: "application-identifier")
-        return StagedAppex(binaryPath: binaryPath)
+        try Task.checkCancellation()
+        return StagedAppex(binaryPath: binaryPath, rootOwner: rootOwner)
     }
 
     private func patchPackageType(at appexPath: String) throws -> [String: Any] {

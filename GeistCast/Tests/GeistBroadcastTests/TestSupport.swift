@@ -55,7 +55,7 @@ private func makeTimeval(seconds: Double) -> timeval {
 private let defaultSocketTimeoutSeconds: Double = 10
 
 func readWireMessage(from fd: Int32, timeoutSeconds: Double = defaultSocketTimeoutSeconds) async throws -> WireMessage {
-    return try await Task.detached(priority: .userInitiated) {
+    return try await runSocketRead {
         var tv = makeTimeval(seconds: timeoutSeconds)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var decoder = WireDecoder()
@@ -74,11 +74,11 @@ func readWireMessage(from fd: Int32, timeoutSeconds: Double = defaultSocketTimeo
             if err == EAGAIN || err == EWOULDBLOCK { throw SocketReadError.timeout }
             throw SocketReadError.errno(err)
         }
-    }.value
+    }
 }
 
 func readBytes(from fd: Int32, count: Int, timeoutSeconds: Double = defaultSocketTimeoutSeconds) async throws -> Data {
-    return try await Task.detached(priority: .userInitiated) {
+    return try await runSocketRead {
         var tv = makeTimeval(seconds: timeoutSeconds)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var data = Data(count: count)
@@ -95,5 +95,15 @@ func readBytes(from fd: Int32, count: Int, timeoutSeconds: Double = defaultSocke
             throw SocketReadError.errno(err)
         }
         return data
-    }.value
+    }
+}
+
+private func runSocketRead<Value: Sendable>(
+    _ operation: @escaping @Sendable () throws -> Value
+) async throws -> Value {
+    try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+            continuation.resume(with: Result { try operation() })
+        }
+    }
 }

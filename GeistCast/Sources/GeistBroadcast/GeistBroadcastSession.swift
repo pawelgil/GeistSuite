@@ -5,6 +5,7 @@ import CoreVideo
 import Foundation
 import Darwin
 import GeistKit
+import Synchronization
 
 struct ExtensionContext: Sendable, Equatable {
     let bundleID: String
@@ -51,6 +52,39 @@ public struct ExtensionTerminationError: Error, Equatable, Sendable {
 
 public actor GeistBroadcastSession {
 
+    private struct SocketPathIdentity: Equatable, Sendable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    private struct ListenerSocket: Sendable {
+        let fd: Int32
+        let pathIdentity: SocketPathIdentity
+    }
+
+    private final class FrameWorkerToken: Sendable {
+        private let active = Mutex(true)
+
+        func deactivate() {
+            active.withLock { $0 = false }
+        }
+
+        func performIfActive<Result: Sendable>(
+            _ operation: () -> Result
+        ) -> Result? {
+            active.withLock { isActive in
+                guard isActive else { return nil }
+                return operation()
+            }
+        }
+    }
+
+    enum AcceptErrorAction: Equatable {
+        case drained
+        case fail
+        case retry
+    }
+
     public enum State: Sendable { case idle, listening, stopped }
 
     public enum SessionError: Error, Equatable {
@@ -82,7 +116,7 @@ public actor GeistBroadcastSession {
     private let frameSocketPath: String
     private let stager: any AppexStaging
     private let spawner: any AppexSpawning
-    private var stagedAppex: Task<StagedAppex, Error>
+    private var stagedAppex: Task<StagedAppex, Error>?
     private var lastStagedSourceHash: String?
     private let appShimDylibPath: String?
     private let extensionShimDylibPath: String?
@@ -92,17 +126,39 @@ public actor GeistBroadcastSession {
     private static let audioQueueCapacity = 16
 
     private var listenFD: Int32 = -1
+    private var listenPathIdentity: SocketPathIdentity?
     private var frameListenFD: Int32 = -1
-    private var acceptTask: Task<Void, Never>?
-    private var frameAcceptTask: Task<Void, Never>?
+    private var frameListenPathIdentity: SocketPathIdentity?
+    private let acceptQueue = DispatchQueue(label: "com.geist.broadcast.control-accept")
+    private var acceptSource: DispatchSourceRead?
+    private let controlReadQueue = DispatchQueue(
+        label: "com.geist.broadcast.control-read",
+        attributes: .concurrent
+    )
+    private let frameAcceptQueue = DispatchQueue(label: "com.geist.broadcast.frame-accept")
+    private var frameAcceptSource: DispatchSourceRead?
+    private let frameServeQueue = DispatchQueue(
+        label: "com.geist.broadcast.frame-serve",
+        attributes: .concurrent
+    )
     private var hostFD: Int32?
     private var extensionFD: Int32?
+    private var controlWriters: [Int32: ControlSocketWriter] = [:]
+    private var controlProcesses: [Int32: SpawnedAppex] = [:]
+    private var controlPeerPIDs: [Int32: pid_t] = [:]
+    private var activeFrameFD: Int32?
+    private var activeFrameToken: FrameWorkerToken?
+    private var pendingFrameFD: Int32?
     private var pendingBroadcast: Broadcast?
     // True once user has confirmed start (countdown ended). Until then, even
     // if the extension has connected via helloExtension, we don't send `begin`
     // — it sits parked. Cleared by userCancelledStart or session reset.
     private var userConfirmedStart: Bool = false
     private var launchTask: Task<Void, Never>?
+    private var launchGeneration: UUID?
+    private var spawnedAppex: SpawnedAppex?
+    private var reapTasks: [UUID: Task<Void, Never>] = [:]
+    private var disconnectedExtensionPeerPID: pid_t?
     private var micAuthPollTask: Task<Void, Never>?
     private var lastMicAuth: Bool = false
     private var clientFDs: Set<Int32> = []
@@ -232,7 +288,15 @@ public actor GeistBroadcastSession {
     public func start() throws {
         guard state == .idle else { throw SessionError.alreadyStarted }
         try openListenSocket()
-        try openFrameListenSocket()
+        do {
+            try openFrameListenSocket()
+        } catch {
+            Self.unlinkOwnedPath(socketPath, identity: listenPathIdentity)
+            close(listenFD)
+            listenFD = -1
+            listenPathIdentity = nil
+            throw error
+        }
         transition(to: .listening)
         spawnAcceptLoop()
         spawnFrameAcceptLoop()
@@ -249,32 +313,41 @@ public actor GeistBroadcastSession {
         videoSource = nil
         micSource?.stop()
         micSource = nil
-        acceptTask?.cancel()
-        acceptTask = nil
-        frameAcceptTask?.cancel()
-        frameAcceptTask = nil
         micAuthPollTask?.cancel()
         micAuthPollTask = nil
-        stagedAppex.cancel()
+        launchTask?.cancel()
+        launchTask = nil
+        launchGeneration = nil
+        let stagingTask = stagedAppex
+        stagedAppex = nil
+        stagingTask?.cancel()
+        cancelReaps()
         videoQueue.close()
         micQueue.close()
-        // shutdown() before close() forces blocked accept()/read() syscalls
-        // to return immediately; Task.cancel() alone doesn't interrupt
-        // kernel-level blocking, so without this the detached loop threads
-        // would stay parked until the kernel decided to GC the fd.
+        // Dispatch-source cancellation owns listener close; shutdown wakes
+        // blocking per-connection reads and writes before worker-owned close.
         if listenFD >= 0 {
-            shutdown(listenFD, SHUT_RDWR); close(listenFD); listenFD = -1
+            Self.unlinkOwnedPath(socketPath, identity: listenPathIdentity)
+            acceptSource?.cancel()
+            listenFD = -1
+            listenPathIdentity = nil
         }
         if frameListenFD >= 0 {
-            shutdown(frameListenFD, SHUT_RDWR); close(frameListenFD); frameListenFD = -1
+            Self.unlinkOwnedPath(frameSocketPath, identity: frameListenPathIdentity)
+            frameAcceptSource?.cancel()
+            frameListenFD = -1
+            frameListenPathIdentity = nil
         }
-        for fd in clientFDs { shutdown(fd, SHUT_RDWR); close(fd) }
-        clientFDs.removeAll()
+        if let pendingFrameFD {
+            shutdown(pendingFrameFD, SHUT_RDWR)
+            closeClientFD(pendingFrameFD)
+            self.pendingFrameFD = nil
+        }
+        for fd in clientFDs { shutdown(fd, SHUT_RDWR) }
+        activeFrameToken?.deactivate()
         hostFD = nil
         extensionFD = nil
         pausedBroadcasts.removeAll()
-        unlink(socketPath)
-        unlink(frameSocketPath)
         transition(to: .stopped)
     }
 
@@ -286,6 +359,27 @@ public actor GeistBroadcastSession {
         if clientFDs.remove(fd) != nil {
             close(fd)
         }
+    }
+
+    private func registerControlFD(_ fd: Int32) {
+        registerClientFD(fd)
+        controlWriters[fd] = ControlSocketWriter(fd: fd, onFailure: {})
+        controlPeerPIDs[fd] = Self.peerProcessID(fd: fd)
+        associateControlProcessIfKnown(fd: fd)
+    }
+
+    private func associateControlProcessIfKnown(fd: Int32) {
+        guard controlProcesses[fd] == nil,
+              let process = spawnedAppex,
+              controlPeerPIDs[fd] == process.pid else { return }
+        controlProcesses[fd] = process
+    }
+
+    nonisolated private static func peerProcessID(fd: Int32) -> pid_t? {
+        var pid: pid_t = 0
+        var size = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0 else { return nil }
+        return pid
     }
 
     public var hasInFlightBroadcast: Bool {
@@ -316,6 +410,7 @@ public actor GeistBroadcastSession {
         userConfirmedStart = false
         launchTask?.cancel()
         launchTask = nil
+        launchGeneration = nil
         detachMicSource()
         detachVideoSource()
     }
@@ -354,15 +449,18 @@ public actor GeistBroadcastSession {
     /// changed since we last staged. Skipped while a broadcast is in flight
     /// or pending — swapping out from under an active spawn would race.
     public func refreshStagedAppexIfNeeded() {
+        guard state != .stopped else { return }
         guard pendingBroadcast == nil, activeBroadcasts.isEmpty else { return }
         let appexPath = extensionContext.appexPath
         guard let currentHash = Self.sourceBinaryHash(appexPath: appexPath) else { return }
         if currentHash == lastStagedSourceHash { return }
         lastStagedSourceHash = currentHash
         let stager = self.stager
+        let previousStagingTask = stagedAppex
         stagedAppex = Task.detached(priority: .utility) {
             try await stager.stage(appexAt: appexPath)
         }
+        previousStagingTask?.cancel()
     }
 
     nonisolated private static func sourceBinaryHash(appexPath: String) -> String? {
@@ -484,10 +582,12 @@ public actor GeistBroadcastSession {
     }
 
     private func openListenSocket() throws {
-        listenFD = try Self.openUnixListener(path: socketPath, backlog: 8)
+        let listener = try Self.openUnixListener(path: socketPath, backlog: 8)
+        listenFD = listener.fd
+        listenPathIdentity = listener.pathIdentity
     }
 
-    private static func openUnixListener(path: String, backlog: Int32) throws -> Int32 {
+    private static func openUnixListener(path: String, backlog: Int32) throws -> ListenerSocket {
         unlink(path)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -496,6 +596,10 @@ public actor GeistBroadcastSession {
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathCapacity = MemoryLayout.size(ofValue: addr.sun_path)
+        guard path.utf8.count < pathCapacity else {
+            close(fd)
+            throw SessionError.bind(errno: ENAMETOOLONG)
+        }
         _ = path.withCString { src in
             withUnsafeMutablePointer(to: &addr.sun_path) { tuplePtr in
                 tuplePtr.withMemoryRebound(to: CChar.self, capacity: pathCapacity) { dst in
@@ -514,41 +618,117 @@ public actor GeistBroadcastSession {
             close(fd)
             throw SessionError.bind(errno: err)
         }
+        guard let pathIdentity = socketPathIdentity(path) else {
+            let err = errno
+            close(fd)
+            throw SessionError.bind(errno: err)
+        }
 
         guard listen(fd, backlog) == 0 else {
             let err = errno
+            unlinkOwnedPath(path, identity: pathIdentity)
+            close(fd)
+            throw SessionError.listen(errno: err)
+        }
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            let err = errno
+            unlinkOwnedPath(path, identity: pathIdentity)
             close(fd)
             throw SessionError.listen(errno: err)
         }
 
-        return fd
+        return ListenerSocket(fd: fd, pathIdentity: pathIdentity)
+    }
+
+    nonisolated private static func socketPathIdentity(_ path: String) -> SocketPathIdentity? {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return nil }
+        return SocketPathIdentity(device: info.st_dev, inode: info.st_ino)
+    }
+
+    nonisolated private static func unlinkOwnedPath(
+        _ path: String,
+        identity: SocketPathIdentity?
+    ) {
+        guard let identity, socketPathIdentity(path) == identity else { return }
+        unlink(path)
     }
 
     private func spawnAcceptLoop() {
         let fd = listenFD
-        acceptTask = Task.detached { [weak self] in
-            while !Task.isCancelled {
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: acceptQueue)
+        source.setEventHandler { [weak self] in
+            while true {
                 let clientFD = accept(fd, nil, nil)
-                if clientFD < 0 { return }
+                if clientFD < 0 {
+                    switch Self.acceptErrorAction(errno: errno) {
+                    case .retry:
+                        continue
+                    case .drained:
+                        return
+                    case .fail:
+                        source.cancel()
+                        Task { await self?.acceptLoopFailed(fd: fd, isFrameListener: false) }
+                        return
+                    }
+                }
+                Self.makeBlocking(clientFD)
                 // Writing to a half-closed socket otherwise raises SIGPIPE
                 // and terminates the host process. Per-socket is preferable
                 // to a process-wide signal handler.
                 var noSigPipe: Int32 = 1
                 setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE,
                            &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-                await self?.registerClientFD(clientFD)
-                self?.startReadLoop(fd: clientFD)
+                let completed = DispatchSemaphore(value: 0)
+                Task { [weak self] in
+                    defer { completed.signal() }
+                    guard let self else {
+                        shutdown(clientFD, SHUT_RDWR)
+                        close(clientFD)
+                        return
+                    }
+                    await self.acceptControlConnection(clientFD)
+                }
+                completed.wait()
             }
         }
+        source.setCancelHandler { close(fd) }
+        acceptSource = source
+        source.activate()
     }
 
-    // Blocking read() must run on a real OS thread, not the Swift cooperative
-    // pool — a handful of in-flight Task.detached read loops will exhaust the
-    // pool (default ≈ cpuCount), preventing new Tasks from being scheduled at
-    // all. Subsequent accepts then never get their handle Task body to fire.
-    // GCD's pool is much larger and tolerates blocked threads.
+    nonisolated private static func makeBlocking(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0 { _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) }
+    }
+
+    private func acceptControlConnection(_ fd: Int32) {
+        guard state == .listening else {
+            shutdown(fd, SHUT_RDWR)
+            close(fd)
+            return
+        }
+        registerControlFD(fd)
+        startReadLoop(fd: fd)
+    }
+
+    static func acceptErrorAction(errno: Int32) -> AcceptErrorAction {
+        if errno == EINTR { return .retry }
+        if errno == EAGAIN || errno == EWOULDBLOCK { return .drained }
+        return .fail
+    }
+
+    private func acceptLoopFailed(fd: Int32, isFrameListener: Bool) {
+        let ownsListener = isFrameListener ? frameListenFD == fd : listenFD == fd
+        guard ownsListener, state == .listening else { return }
+        stop()
+    }
+
+    // Blocking socket calls stay off Swift's cooperative executor.
     private nonisolated func startReadLoop(fd clientFD: Int32) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // stop() shuts down the fd, bounding this retention through owner cleanup.
+        controlReadQueue.async { [self] in
             var decoder = WireDecoder()
             var buf = [UInt8](repeating: 0, count: 4096)
             while true {
@@ -556,32 +736,39 @@ public actor GeistBroadcastSession {
                     read(clientFD, bp.baseAddress, bp.count)
                 }
                 if n <= 0 {
-                    Task { [weak self] in
-                        await self?.cleanupConnection(fd: clientFD)
-                        await self?.closeClientFD(clientFD)
+                    let completed = DispatchSemaphore(value: 0)
+                    Task {
+                        await self.connectionEnded(fd: clientFD)
+                        completed.signal()
                     }
+                    completed.wait()
                     return
                 }
                 let chunk = Data(buf[0..<n])
                 let messages = decoder.feed(chunk)
-                // One Task per chunk with sequential awaits — N Tasks
-                // would let the scheduler reorder them on the actor.
                 if !messages.isEmpty {
-                    Task { [weak self] in
-                        for message in messages {
-                            await self?.ingest(message, from: clientFD)
-                        }
+                    let completed = DispatchSemaphore(value: 0)
+                    Task {
+                        await self.ingest(messages, from: clientFD)
+                        completed.signal()
                     }
-                }
-                if self == nil {
-                    close(clientFD)
-                    return
+                    completed.wait()
                 }
             }
         }
     }
 
-    private func cleanupConnection(fd: Int32) async {
+    private func connectionEnded(fd: Int32) {
+        guard clientFDs.remove(fd) != nil else { return }
+        let process = controlProcesses.removeValue(forKey: fd)
+        let peerPID = controlPeerPIDs.removeValue(forKey: fd)
+        shutdown(fd, SHUT_RDWR)
+        let writer = controlWriters.removeValue(forKey: fd)
+        if let writer {
+            writer.close { close(fd) }
+        } else {
+            close(fd)
+        }
         if hostFD == fd {
             log.notice("[Session \(self.hostBundleID)] host fd closed (fd=\(fd))")
             hostFD = nil
@@ -610,20 +797,38 @@ public actor GeistBroadcastSession {
             userConfirmedStart = false
             detachMicSource()
             detachVideoSource()
-            // Reap any appex process that survived past control disconnect
-            // (e.g. CoreAudio init wedged in a non-fatal assertion loop) —
-            // otherwise it lingers and the next spawn can't bind sockets.
-            // killStale uses pkill -f against the binary path, which a fresh
-            // extension also matches, so skip the reap if one connected (or
-            // re-armed) during the awaits.
-            if let staged = try? await stagedAppex.value,
-               extensionFD == nil, pendingBroadcast == nil {
-                await spawner.killStale(stagedBinary: staged.binaryPath)
+            if let process {
+                scheduleDisconnectedExtensionReap(process)
+            } else {
+                disconnectedExtensionPeerPID = peerPID
             }
         }
     }
 
-    private func ingest(_ message: WireMessage, from fd: Int32) async {
+    private func scheduleDisconnectedExtensionReap(_ process: SpawnedAppex) {
+        cancelReaps()
+        let spawner = self.spawner
+        reapTasks[process.generation] = Task { [weak self] in
+            await Task.yield()
+            if !Task.isCancelled { await spawner.terminate(process) }
+            await self?.reapFinished(generation: process.generation)
+        }
+    }
+
+    private func cancelReaps() {
+        for task in reapTasks.values { task.cancel() }
+    }
+
+    private func reapFinished(generation: UUID) {
+        reapTasks.removeValue(forKey: generation)
+    }
+
+    private func ingest(_ messages: [WireMessage], from fd: Int32) {
+        guard state == .listening, clientFDs.contains(fd) else { return }
+        for message in messages { ingest(message, from: fd) }
+    }
+
+    private func ingest(_ message: WireMessage, from fd: Int32) {
         switch message {
         case .helloHost:
             log.notice("[Session \(self.hostBundleID)] helloHost fd=\(fd) recording=\(!self.activeBroadcasts.isEmpty)")
@@ -644,6 +849,9 @@ public actor GeistBroadcastSession {
             if let old = extensionFD {
                 shutdown(old, SHUT_RDWR)
             }
+            cancelReaps()
+            associateControlProcessIfKnown(fd: fd)
+            disconnectedExtensionPeerPID = nil
             extensionFD = fd
             if userConfirmedStart, let broadcast = pendingBroadcast {
                 send(.begin(broadcast), to: fd)
@@ -666,6 +874,7 @@ public actor GeistBroadcastSession {
             log.notice("[Session \(self.hostBundleID)] userCancelledStart")
             launchTask?.cancel()
             launchTask = nil
+            launchGeneration = nil
             if let extFD = extensionFD {
                 // shutdown only; closeClientFD happens in the read-loop
                 // teardown so a recycled fd number can't be killed by
@@ -704,7 +913,7 @@ public actor GeistBroadcastSession {
 
         case .broadcastEnded(let broadcast):
             // The extension emits "ended" after its ~5s post-finish grace.
-            // stopBroadcast() and cleanupConnection() may have already
+            // stopBroadcast() and connectionEnded() may have already
             // processed the end — re-firing the delegate and re-sending the
             // wire envelope to the host would confuse the host's state
             // machine (some hosts treat a late "ended" as a forced stop and
@@ -742,6 +951,8 @@ public actor GeistBroadcastSession {
 
     private func armBroadcast() {
         guard pendingBroadcast == nil else { return }
+        cancelReaps()
+        spawnedAppex = nil
         let broadcast = Broadcast(
             simulatorUDID: simulator,
             hostAppBundleID: hostBundleID,
@@ -750,8 +961,9 @@ public actor GeistBroadcastSession {
         )
         pendingBroadcast = broadcast
         log.notice("[Session \(self.hostBundleID)] armBroadcast: spawning extension \(self.extensionContext.bundleID)")
-        // simctl spawn blocks until the extension exits.
-        launchTask = Task { [weak self] in await self?.launchExtension() }
+        let generation = UUID()
+        launchGeneration = generation
+        launchTask = Task { [weak self] in await self?.launchExtension(generation: generation) }
     }
 
     private func pollMicAuth() async {
@@ -776,23 +988,53 @@ public actor GeistBroadcastSession {
         }
     }
 
-    private func launchExtension() async {
+    private func launchExtension(generation: UUID) async {
         do {
-            let staged = try await stagedAppex.value
-            try await spawner.spawn(
-                stagedBinary: staged.binaryPath,
+            guard launchGeneration == generation,
+                  !Task.isCancelled,
+                  state == .listening else { return }
+            guard let stagingTask = stagedAppex else { return }
+            let staged = try await stagingTask.value
+            guard launchGeneration == generation,
+                  !Task.isCancelled,
+                  state == .listening else { return }
+            let process = try await spawner.spawn(
+                stagedAppex: staged,
                 simulatorUDID: simulator,
                 simctlSetPath: simctlSetPath,
                 environment: try extensionLaunchEnv()
             )
+            guard launchGeneration == generation,
+                  !Task.isCancelled,
+                  state == .listening else {
+                await spawner.terminate(process)
+                return
+            }
+            spawnedAppex = process
+            for fd in controlWriters.keys {
+                associateControlProcessIfKnown(fd: fd)
+            }
+            if disconnectedExtensionPeerPID == process.pid {
+                disconnectedExtensionPeerPID = nil
+                scheduleDisconnectedExtensionReap(process)
+            }
+            finishLaunch(generation: generation)
         } catch {
+            guard launchGeneration == generation else { return }
             log.warn("Session: launchExtension failed: \(error)")
             if let pending = pendingBroadcast {
                 delegate?.session(self, broadcastFailedToStart: pending, error: error)
             }
             pendingBroadcast = nil
             userConfirmedStart = false
+            finishLaunch(generation: generation)
         }
+    }
+
+    private func finishLaunch(generation: UUID) {
+        guard launchGeneration == generation else { return }
+        launchTask = nil
+        launchGeneration = nil
     }
 
     private func extensionLaunchEnv() throws -> [String: String] {
@@ -819,67 +1061,166 @@ public actor GeistBroadcastSession {
     }
 
     private func openFrameListenSocket() throws {
-        frameListenFD = try Self.openUnixListener(path: frameSocketPath, backlog: 4)
+        let listener = try Self.openUnixListener(path: frameSocketPath, backlog: 4)
+        frameListenFD = listener.fd
+        frameListenPathIdentity = listener.pathIdentity
     }
 
     private func spawnFrameAcceptLoop() {
         let fd = frameListenFD
         let videoQ = videoQueue
         let micQ = micQueue
-        frameAcceptTask = Task.detached { [weak self] in
-            while !Task.isCancelled {
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: frameAcceptQueue)
+        source.setEventHandler { [weak self] in
+            while true {
                 let clientFD = accept(fd, nil, nil)
-                if clientFD < 0 { return }
+                if clientFD < 0 {
+                    switch Self.acceptErrorAction(errno: errno) {
+                    case .retry:
+                        continue
+                    case .drained:
+                        return
+                    case .fail:
+                        source.cancel()
+                        Task { await self?.acceptLoopFailed(fd: fd, isFrameListener: true) }
+                        return
+                    }
+                }
+                Self.makeBlocking(clientFD)
                 var noSigPipe: Int32 = 1
                 setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE,
                            &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-                await self?.registerClientFD(clientFD)
-                Task.detached { [weak self] in
-                    await Self.serveFrames(
-                        fd: clientFD,
+                let completed = DispatchSemaphore(value: 0)
+                Task { [weak self] in
+                    defer { completed.signal() }
+                    guard let self else {
+                        shutdown(clientFD, SHUT_RDWR)
+                        close(clientFD)
+                        return
+                    }
+                    await self.acceptFrameConnection(
+                        clientFD,
                         videoQueue: videoQ,
                         micQueue: micQ
                     )
-                    await self?.closeClientFD(clientFD)
                 }
+                completed.wait()
+            }
+        }
+        source.setCancelHandler { close(fd) }
+        frameAcceptSource = source
+        source.activate()
+    }
+
+    private func acceptFrameConnection(
+        _ fd: Int32,
+        videoQueue: BoundedFrameQueue<Data>,
+        micQueue: BoundedFrameQueue<Data>
+    ) {
+        guard state == .listening else {
+            shutdown(fd, SHUT_RDWR)
+            close(fd)
+            return
+        }
+        registerClientFD(fd)
+        guard activeFrameFD == nil else {
+            if let pendingFrameFD {
+                shutdown(pendingFrameFD, SHUT_RDWR)
+                closeClientFD(pendingFrameFD)
+            }
+            pendingFrameFD = fd
+            guard let activeFrameFD else { return }
+            shutdown(activeFrameFD, SHUT_RDWR)
+            activeFrameToken?.deactivate()
+            return
+        }
+        startFrameWorker(fd: fd, videoQueue: videoQueue, micQueue: micQueue)
+    }
+
+    private func startFrameWorker(
+        fd: Int32,
+        videoQueue: BoundedFrameQueue<Data>,
+        micQueue: BoundedFrameQueue<Data>
+    ) {
+        let token = FrameWorkerToken()
+        activeFrameFD = fd
+        activeFrameToken = token
+        frameServeQueue.async { [weak self] in
+            Self.serveFrames(
+                fd: fd,
+                token: token,
+                videoQueue: videoQueue,
+                micQueue: micQueue
+            )
+            Task { [weak self] in
+                guard let self else {
+                    close(fd)
+                    return
+                }
+                await self.frameConnectionEnded(
+                    fd: fd,
+                    videoQueue: videoQueue,
+                    micQueue: micQueue
+                )
             }
         }
     }
 
-    nonisolated private static func serveFrames(
+    private func frameConnectionEnded(
         fd: Int32,
         videoQueue: BoundedFrameQueue<Data>,
         micQueue: BoundedFrameQueue<Data>
-    ) async {
-        while !Task.isCancelled {
-            var wroteAny = false
-            var openCount = 0
+    ) {
+        closeClientFD(fd)
+        guard activeFrameFD == fd else { return }
+        activeFrameFD = nil
+        activeFrameToken = nil
+        guard state == .listening, let replacement = pendingFrameFD else {
+            pendingFrameFD = nil
+            return
+        }
+        pendingFrameFD = nil
+        startFrameWorker(fd: replacement, videoQueue: videoQueue, micQueue: micQueue)
+    }
 
-            switch micQueue.dequeue(timeoutSeconds: 0) {
-            case .received(let payload):
-                if !writeAll(fd: fd, data: payload) { return }
-                wroteAny = true
-                openCount += 1
-            case .empty:
-                openCount += 1
-            case .closed:
-                break
-            }
+    nonisolated private static func serveFrames(
+        fd: Int32,
+        token: FrameWorkerToken,
+        videoQueue: BoundedFrameQueue<Data>,
+        micQueue: BoundedFrameQueue<Data>
+    ) {
+        while true {
+            guard let iteration = token.performIfActive({
+                var wroteAny = false
+                var openCount = 0
 
-            switch videoQueue.dequeue(timeoutSeconds: 0) {
-            case .received(let payload):
-                if !writeAll(fd: fd, data: payload) { return }
-                wroteAny = true
-                openCount += 1
-            case .empty:
-                openCount += 1
-            case .closed:
-                break
-            }
+                switch micQueue.dequeue(timeoutSeconds: 0) {
+                case .received(let payload):
+                    if !writeAll(fd: fd, data: payload) { return (false, 0) }
+                    wroteAny = true
+                    openCount += 1
+                case .empty:
+                    openCount += 1
+                case .closed:
+                    break
+                }
 
-            if openCount == 0 { return }
-            if !wroteAny {
-                try? await Task.sleep(for: .milliseconds(5))
+                switch videoQueue.dequeue(timeoutSeconds: 0) {
+                case .received(let payload):
+                    if !writeAll(fd: fd, data: payload) { return (false, 0) }
+                    wroteAny = true
+                    openCount += 1
+                case .empty:
+                    openCount += 1
+                case .closed:
+                    break
+                }
+                return (wroteAny, openCount)
+            }) else { return }
+
+            if iteration.1 == 0 { return }
+            if !iteration.0 {
+                usleep(5_000)
             }
         }
     }
@@ -901,7 +1242,11 @@ public actor GeistBroadcastSession {
     }
 
     private func send(_ message: WireMessage, to fd: Int32) {
-        _ = Self.writeAll(fd: fd, data: encoder.encode(message))
+        guard let writer = controlWriters[fd] else {
+            shutdown(fd, SHUT_RDWR)
+            return
+        }
+        _ = writer.enqueue(encoder.encode(message))
     }
 }
 
