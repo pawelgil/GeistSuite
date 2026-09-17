@@ -28,7 +28,7 @@ struct SimDeviceResolver: Sendable {
             throw ResolverError.developerDirUnavailable
         }
         let context: SimServiceContext
-        do { context = try SimServiceContext(forDeveloperDir: developerDir) }
+        do { context = try SimServiceContext.sharedServiceContext(forDeveloperDir: developerDir) }
         catch { throw ResolverError.serviceContextInitFailed(String(describing: error)) }
 
         let deviceSet: SimDeviceSet

@@ -16,7 +16,7 @@ public final class CoreSimulatorEventSource: SimulatorEventSource, @unchecked Se
     public func startObserving(onPoke: @escaping () -> Void) -> Bool {
         guard NSClassFromString("SimServiceContext") != nil,
               let developerDir = developerDirResolver.resolve(),
-              let context = try? SimServiceContext(forDeveloperDir: developerDir),
+              let context = try? SimServiceContext.sharedServiceContext(forDeveloperDir: developerDir),
               let set = try? context.defaultDeviceSet() else {
             return false
         }

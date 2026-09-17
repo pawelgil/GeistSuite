@@ -29,7 +29,7 @@ public final class SimulatorScreenCapture: @unchecked Sendable {
         }
         let context: SimServiceContext
         do {
-            context = try SimServiceContext(forDeveloperDir: developerDir)
+            context = try SimServiceContext.sharedServiceContext(forDeveloperDir: developerDir)
         } catch {
             throw SimulatorScreenError.serviceContextFailed(error)
         }
