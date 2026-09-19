@@ -73,6 +73,10 @@ final class BroadcastFrameTransport: Sendable {
         }
     }
 
+    // MARK: Static Properties
+
+    private static let maximumAudioBurst = 16
+
     // MARK: Properties
 
     let path: String
@@ -88,7 +92,10 @@ final class BroadcastFrameTransport: Sendable {
     init(path: String) {
         self.path = path
         let videoQueue = BoundedFrameQueue<Data>(capacity: 1)
-        let micQueue = BoundedFrameQueue<Data>(capacity: 16)
+        let micQueue = BoundedFrameQueue<Data>(
+            maximumWeight: Self.maximumAudioBurst * MicQueueWeight.maximumCost,
+            maximumCount: 256
+        )
         self.videoQueue = videoQueue
         self.micQueue = micQueue
         sink = SessionBroadcastSink(videoQueue: videoQueue, micQueue: micQueue)
@@ -101,28 +108,20 @@ final class BroadcastFrameTransport: Sendable {
     // MARK: Static Functions
 
     private static func serve(
-        _ connection: Connection, videoQueue: BoundedFrameQueue<Data>, micQueue: BoundedFrameQueue<Data>,
+        _ connection: Connection, videoQueue: BoundedFrameQueue<Data>, micQueue: BoundedFrameQueue<Data>
     ) {
+        let scheduler = FrameQueueScheduler<Data>(maximumAudioBurst: maximumAudioBurst)
         while true {
             guard let iteration = connection.token.performIfActive({
-                var wroteAny = false
-                var openCount = 0
-                for queue in [micQueue, videoQueue] {
-                    switch queue.dequeue(timeoutSeconds: 0) {
-                    case let .received(payload):
-                        guard writeAll(fd: connection.fd, data: payload) else { return (false, 0) }
-                        wroteAny = true
-                        openCount += 1
-                    case .empty:
-                        openCount += 1
-                    case .closed:
-                        break
-                    }
+                scheduler.runIteration(audioQueue: micQueue, videoQueue: videoQueue) { payload in
+                    writeAll(fd: connection.fd, data: payload)
                 }
-                return (wroteAny, openCount)
             }) else { return }
-            if iteration.1 == 0 { return }
-            if !iteration.0 { usleep(5000) }
+            switch iteration {
+            case .finished: return
+            case .idle: usleep(5000)
+            case .wroteFrames: continue
+            }
         }
     }
 
@@ -154,7 +153,7 @@ final class BroadcastFrameTransport: Sendable {
                     }
                     accept(fd)
                 },
-                onFailure: onFatalFailure,
+                onFailure: onFatalFailure
             )
             state.listener = listener
             state.phase = .listening

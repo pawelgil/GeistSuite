@@ -25,10 +25,26 @@ struct BroadcastFrameTransportTests {
         expectVideo(next, matching: nextVideo, fill: 51)
     }
 
-    @Test func `sink audio queue full preserves first sixteen frames`() async throws {
+    @Test func Sink_TinyAudioQueueFull_PreservesFirst256Frames() async throws {
         let sut = createSUT()
         defer { sut.stop() }
-        try enqueueAudio(0 ... 16, into: sut)
+        try enqueueAudio(0 ... 256, into: sut)
+        try sut.start(onFatalFailure: {})
+        let client = try connect(to: sut.path)
+        defer { close(client) }
+
+        let samples = try await readAudioSamples(count: 256, from: client)
+        try sut.sink.sendMicAudio(makeAudio(sample: 99))
+        let next = try await readAudioSamples(count: 1, from: client)
+
+        #expect(samples == Array(0 ... 255))
+        #expect(next == [99])
+    }
+
+    @Test func Sink_AudioDurationBudgetFull_DropsNewest() async throws {
+        let sut = createSUT()
+        defer { sut.stop() }
+        try enqueueAudio(0 ... 16, frameCount: 4800, into: sut)
         try sut.start(onFatalFailure: {})
         let client = try connect(to: sut.path)
         defer { close(client) }
@@ -39,6 +55,25 @@ struct BroadcastFrameTransportTests {
 
         #expect(samples == Array(0 ... 15))
         #expect(next == [99])
+    }
+
+    @Test func Transport_AudioBacklog_DeliversVideoAfterBoundedBurst() async throws {
+        let sut = createSUT()
+        defer { sut.stop() }
+        try enqueueAudio(0 ... 16, into: sut)
+        let video = try makeVideo(fill: 17)
+        sut.sink.sendVideo(video)
+        try sut.start(onFatalFailure: {})
+        let client = try connect(to: sut.path)
+        defer { close(client) }
+
+        let samples = try await readAudioSamples(count: 16, from: client)
+        let frame = try await readFrame(from: client)
+        let remaining = try await readAudioSamples(count: 1, from: client)
+
+        #expect(samples == Array(0 ... 15))
+        expectVideo(frame, matching: video, fill: 17)
+        #expect(remaining == [16])
     }
 
     @Test func `connection replaced closes previous before delivering to replacement`() async throws {
@@ -183,7 +218,7 @@ struct BroadcastFrameTransportTests {
     }
 
     private func expectVideo(
-        _ frame: (header: FrameHeader, payload: Data), matching video: CVPixelBuffer, fill: UInt8,
+        _ frame: (header: FrameHeader, payload: Data), matching video: CVPixelBuffer, fill: UInt8
     ) {
         let bytesPerRow = CVPixelBufferGetBytesPerRow(video)
         let height = CVPixelBufferGetHeight(video)
@@ -192,7 +227,7 @@ struct BroadcastFrameTransportTests {
             pixelFormatFourCC: CVPixelBufferGetPixelFormatType(video),
             width: UInt32(CVPixelBufferGetWidth(video)), height: UInt32(height),
             bytesPerRowPlane0: UInt32(bytesPerRow), bytesPerRowPlane1: 0,
-            payloadSize: UInt32(expectedPayload.count),
+            payloadSize: UInt32(expectedPayload.count)
         )
 
         #expect(frame.header == expectedHeader)
@@ -212,19 +247,19 @@ struct BroadcastFrameTransportTests {
         return result
     }
 
-    private func makeAudio(sample: Int16) throws -> AVAudioPCMBuffer {
+    private func makeAudio(sample: Int16, frameCount: AVAudioFrameCount = 1) throws -> AVAudioPCMBuffer {
         let format = try #require(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48000,
                                                 channels: 1, interleaved: false))
-        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
-        buffer.frameLength = 1
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount))
+        buffer.frameLength = frameCount
         let channels = try #require(buffer.int16ChannelData)
-        channels[0][0] = sample
+        channels[0].update(repeating: sample, count: Int(frameCount))
         return buffer
     }
 
-    private func enqueueAudio(_ samples: ClosedRange<Int16>, into sut: BroadcastFrameTransport) throws {
+    private func enqueueAudio(_ samples: ClosedRange<Int16>, frameCount: AVAudioFrameCount = 1, into sut: BroadcastFrameTransport) throws {
         for sample in samples {
-            try sut.sink.sendMicAudio(makeAudio(sample: sample))
+            try sut.sink.sendMicAudio(makeAudio(sample: sample, frameCount: frameCount))
         }
     }
 
@@ -233,7 +268,7 @@ struct BroadcastFrameTransportTests {
         for _ in 0 ..< count {
             let frame = try await readFrame(from: fd)
             try #require(frame.header.streamType == StreamType.audioMic.rawValue)
-            try #require(frame.payload.count == MemoryLayout<Int16>.size)
+            try #require(frame.payload.count >= MemoryLayout<Int16>.size)
             samples.append(frame.payload.withUnsafeBytes { $0.loadUnaligned(as: Int16.self) })
         }
         return samples

@@ -45,7 +45,7 @@ final class SessionBroadcastSink: BroadcastSink {
             bytesPerRowPlane1 = 0
             payload.append(UnsafeBufferPointer(
                 start: base.assumingMemoryBound(to: UInt8.self),
-                count: bpr * Int(height),
+                count: bpr * Int(height)
             ))
         } else {
             let bpr0: Int = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
@@ -53,7 +53,7 @@ final class SessionBroadcastSink: BroadcastSink {
             guard let p0 = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
             bytesPerRowPlane0 = UInt32(bpr0)
             payload.append(UnsafeBufferPointer(
-                start: p0.assumingMemoryBound(to: UInt8.self), count: bpr0 * h0,
+                start: p0.assumingMemoryBound(to: UInt8.self), count: bpr0 * h0
             ))
             if planeCount >= 2 {
                 let bpr1: Int = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
@@ -61,7 +61,7 @@ final class SessionBroadcastSink: BroadcastSink {
                 guard let p1 = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) else { return nil }
                 bytesPerRowPlane1 = UInt32(bpr1)
                 payload.append(UnsafeBufferPointer(
-                    start: p1.assumingMemoryBound(to: UInt8.self), count: bpr1 * h1,
+                    start: p1.assumingMemoryBound(to: UInt8.self), count: bpr1 * h1
                 ))
             } else {
                 bytesPerRowPlane1 = 0
@@ -74,7 +74,7 @@ final class SessionBroadcastSink: BroadcastSink {
             height: height,
             bytesPerRowPlane0: bytesPerRowPlane0,
             bytesPerRowPlane1: bytesPerRowPlane1,
-            payloadSize: UInt32(payload.count),
+            payloadSize: UInt32(payload.count)
         )
         var out = header.encoded()
         out.append(payload)
@@ -100,7 +100,7 @@ final class SessionBroadcastSink: BroadcastSink {
                 let bytes = Int(sampleCount) * bytesPerSample
                 payload.append(UnsafeBufferPointer(
                     start: UnsafeRawPointer(channel).assumingMemoryBound(to: UInt8.self),
-                    count: bytes,
+                    count: bytes
                 ))
             }
         case .pcmFormatFloat32:
@@ -112,7 +112,7 @@ final class SessionBroadcastSink: BroadcastSink {
                 let bytes = Int(sampleCount) * bytesPerSample
                 payload.append(UnsafeBufferPointer(
                     start: UnsafeRawPointer(channel).assumingMemoryBound(to: UInt8.self),
-                    count: bytes,
+                    count: bytes
                 ))
             }
         default:
@@ -130,7 +130,7 @@ final class SessionBroadcastSink: BroadcastSink {
             sampleFormat: wireFormat,
             isInterleaved: false,
             sampleCount: sampleCount,
-            payloadSize: UInt32(payload.count),
+            payloadSize: UInt32(payload.count)
         )
         var out = header.encoded()
         out.append(payload)
@@ -156,6 +156,11 @@ final class SessionBroadcastSink: BroadcastSink {
 
     func sendMicAudio(_ samples: AVAudioPCMBuffer) {
         guard let payload = Self.encodeAudio(samples, stream: .audioMic) else { return }
-        _ = micQueue.enqueueOrDropNewest(payload)
+        let weight = MicQueueWeight.cost(
+            encodedByteCount: payload.count,
+            frameCount: Int(samples.frameLength),
+            sampleRate: samples.format.sampleRate
+        )
+        _ = micQueue.enqueueOrDropNewest(payload, weight: weight)
     }
 }
