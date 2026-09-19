@@ -1,16 +1,31 @@
 #import "Source.h"
 #import "Server.h"
+#import "SerializedSourceProvider.h"
+#import "SourceAttributes.h"
+#import "SourceEnumeration.h"
 #import "Util.h"
 #import "Wire.h"
 #import <objc/message.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 static CMDerivedObjectCreateFn      g_CMDerivedObjectCreate;
 static FigCaptureSourceGetClassIDFn g_FigCaptureSourceGetClassID;
 static FigSimpleMutexCreateFn       g_FigSimpleMutexCreate;
+static GeistCamSourceEnumeration    g_sourceEnumeration;
+static GeistCamSourceAttributes     g_sourceAttributes;
+static GeistCamSerializedSourceProvider *g_sourceProvider;
+static CFStringRef                  g_localizedNameKey;
+static CFStringRef                  g_minFrameRateKey;
+static CFStringRef                  g_maxFrameRateKey;
+
+static CFStringRef resolveCFStringConstant(const char *symbol) {
+    CFStringRef *address = (CFStringRef *)dlsym(RTLD_DEFAULT, symbol);
+    return address ? *address : NULL;
+}
 
 static int resolveCMCaptureSymbols(void) {
     if (g_CMDerivedObjectCreate && g_FigCaptureSourceGetClassID && g_FigSimpleMutexCreate) return 0;
@@ -104,13 +119,17 @@ static NSArray *makeFigCaptureSourceVideoFormats(float frameRate) {
 }
 
 static GeistCamSource s_sources[GEISTCAM_MAX_SOURCES];
-static int s_sourceCount = 0;
+static _Atomic int s_sourceCount = 0;
 
-int simSourceCount(void) { return s_sourceCount; }
-GeistCamSource *simSourceAtIndex(int i) { return (i >= 0 && i < s_sourceCount) ? &s_sources[i] : NULL; }
+int simSourceCount(void) { return atomic_load_explicit(&s_sourceCount, memory_order_acquire); }
+GeistCamSource *simSourceAtIndex(int i) {
+    int count = atomic_load_explicit(&s_sourceCount, memory_order_acquire);
+    return (i >= 0 && i < count) ? &s_sources[i] : NULL;
+}
 
 GeistCamSource *findSourceByObj(void *obj) {
-    for (int i = 0; i < s_sourceCount; i++) {
+    int count = atomic_load_explicit(&s_sourceCount, memory_order_acquire);
+    for (int i = 0; i < count; i++) {
         if (s_sources[i].baseObj == obj) return &s_sources[i];
     }
     return NULL;
@@ -118,14 +137,16 @@ GeistCamSource *findSourceByObj(void *obj) {
 
 GeistCamSource *findSourceByUniqueID(NSString *uid) {
     if (!uid) return NULL;
-    for (int i = 0; i < s_sourceCount; i++) {
+    int count = atomic_load_explicit(&s_sourceCount, memory_order_acquire);
+    for (int i = 0; i < count; i++) {
         if ([s_sources[i].uniqueID isEqualToString:uid]) return &s_sources[i];
     }
     return NULL;
 }
 
 GeistCamSource *findSourceByKind(GeistCamSourceKind kind) {
-    for (int i = 0; i < s_sourceCount; i++) {
+    int count = atomic_load_explicit(&s_sourceCount, memory_order_acquire);
+    for (int i = 0; i < count; i++) {
         if (s_sources[i].kind == kind) return &s_sources[i];
     }
     return NULL;
@@ -151,24 +172,37 @@ AVCaptureDevice *firstDeviceInPorts(NSArray<AVCaptureInputPort *> *ports) {
 
 static NSDictionary *makeAttributesDictionaryFor(GeistCamSource *src) {
     if (!src) return @{};
-    return @{
+    NSMutableDictionary *attributes = [@{
         (__bridge id)kFigCaptureSourceAttributeKey_UniqueID:      src->uniqueID,
         (__bridge id)kFigCaptureSourceAttributeKey_DeviceType:    @(src->deviceType),
         (__bridge id)kFigCaptureSourceAttributeKey_Position:      @(src->devicePosition),
-        (__bridge id)kFigCaptureSourceAttributeKey_LocalizedName: src->localizedName,
+        (__bridge id)(g_localizedNameKey ?: CFSTR("LocalizedName")): src->localizedName,
         (__bridge id)kFigCaptureSourceAttributeKey_SourceType:    @(0),
-        (__bridge id)kFigCaptureSourceAttributeKey_MinFrameRate:  @(15.0),
-        (__bridge id)kFigCaptureSourceAttributeKey_MaxFrameRate:  @(30.0),
-    };
+    } mutableCopy];
+    if (g_sourceAttributes.mode == GeistCamSourceAttributesModeLegacyDictionary) {
+        if (g_minFrameRateKey) attributes[(__bridge id)g_minFrameRateKey] = @(15.0);
+        if (g_maxFrameRateKey) attributes[(__bridge id)g_maxFrameRateKey] = @(30.0);
+    }
+    return attributes;
 }
+
+typedef OSStatusFig (*FigCopyPropertyFn)(void *, CFStringRef, CFAllocatorRef, CFTypeRef *);
+typedef OSStatusFig (*FigSetPropertyFn)(void *, CFStringRef, CFTypeRef);
+
+static FigCopyPropertyFn s_originalCopyProperty;
+static FigSetPropertyFn s_originalSetProperty;
 
 static OSStatusFig our_CopyProperty(void *obj, CFStringRef key, CFAllocatorRef allocator, CFTypeRef *outValue) {
     GeistCamSource *src = findSourceByObj(obj);
+    if (!src) return s_originalCopyProperty ? s_originalCopyProperty(obj, key, allocator, outValue) : -16463;
     if (!key || !outValue) return -16463;
     *outValue = NULL;
-    if (CFEqual(key, kFigCaptureSourceProperty_AttributesDictionary)) {
-        *outValue = CFBridgingRetain(makeAttributesDictionaryFor(src));
-        return 0;
+    if (g_sourceAttributes.propertyKey && CFEqual(key, g_sourceAttributes.propertyKey)) {
+        *outValue = geistcam_createSourceAttributes(
+            g_sourceAttributes,
+            makeAttributesDictionaryFor(src)
+        );
+        return *outValue ? 0 : -16463;
     }
     if (CFEqual(key, kFigCaptureSourceProperty_Formats)) {
         if (src && src->kind == GeistCamSourceKind_Audio) {
@@ -183,6 +217,9 @@ static OSStatusFig our_CopyProperty(void *obj, CFStringRef key, CFAllocatorRef a
 }
 
 static OSStatusFig our_SetProperty(void *obj, CFStringRef key, CFTypeRef value) {
+    if (!findSourceByObj(obj)) {
+        return s_originalSetProperty ? s_originalSetProperty(obj, key, value) : -16463;
+    }
     return 0;
 }
 
@@ -192,6 +229,7 @@ static const void *s_simSourceVTable;
 static int patchVTableFromLiveSource(void *src) {
     if (s_vtablePatched) return 0;
     if (!src) return -1;
+    if (resolveCMCaptureSymbols() != 0) return -5;
     void *vt = CMBaseObjectGetVTable(src);
     if (!vt) return -2;
     s_simSourceVTable = vt;
@@ -199,6 +237,9 @@ static int patchVTableFromLiveSource(void *src) {
     if (!baseClass) return -3;
     void **slot6 = (void **)((char *)baseClass + 0x30);
     void **slot7 = (void **)((char *)baseClass + 0x38);
+    FigCopyPropertyFn originalCopyProperty = (FigCopyPropertyFn)*slot6;
+    FigSetPropertyFn originalSetProperty = (FigSetPropertyFn)*slot7;
+    if (originalCopyProperty == our_CopyProperty || originalSetProperty == our_SetProperty) return -6;
 
     vm_size_t pageSize = (vm_size_t)sysconf(_SC_PAGE_SIZE);
     vm_address_t pageStart = (vm_address_t)slot6 & ~((vm_address_t)pageSize - 1);
@@ -209,6 +250,8 @@ static int patchVTableFromLiveSource(void *src) {
                         VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
         if (kr != KERN_SUCCESS) return -4;
     }
+    s_originalCopyProperty = originalCopyProperty;
+    s_originalSetProperty = originalSetProperty;
     *slot6 = (void *)&our_CopyProperty;
     *slot7 = (void *)&our_SetProperty;
     vm_protect(mach_task_self(), pageStart, pageSize, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
@@ -241,10 +284,11 @@ static void registerGeistCamSource(GeistCamSourceKind kind,
                                int32_t width,
                                int32_t height,
                                float frameRate) {
-    if (s_sourceCount >= GEISTCAM_MAX_SOURCES) return;
+    int index = atomic_load_explicit(&s_sourceCount, memory_order_relaxed);
+    if (index >= GEISTCAM_MAX_SOURCES) return;
     void *baseObj = mintFigCaptureSource();
     if (!baseObj) return;
-    s_sources[s_sourceCount] = (GeistCamSource){
+    s_sources[index] = (GeistCamSource){
         .kind = kind,
         .baseObj = baseObj,
         .uniqueID = uniqueID,
@@ -257,21 +301,39 @@ static void registerGeistCamSource(GeistCamSourceKind kind,
         .frameRate = frameRate,
     };
     geistcam_markerf("registered GeistCamSource[%d] kind=%d uid='%s' %dx%d@%.1ffps",
-                      s_sourceCount, (int)kind, uniqueID.UTF8String, width, height, frameRate);
-    s_sourceCount++;
+                      index, (int)kind, uniqueID.UTF8String, width, height, frameRate);
+    atomic_store_explicit(&s_sourceCount, index + 1, memory_order_release);
 }
 
-static BOOL buildGeistCamSources(void) {
-    if (s_sourceCount > 0) return YES;
+static BOOL buildGeistCamSources(NSArray *appleSources) {
+    if (atomic_load_explicit(&s_sourceCount, memory_order_acquire) > 0) return YES;
 
     GeistCamSlotInfo slots[GEISTCAM_SLOT_COUNT] = {0};
     BOOL configured[GEISTCAM_SLOT_COUNT] = {NO, NO, NO};
     if (!serverWaitForHello(/*timeoutSec*/ 5.0, slots, configured)) {
         geistcam_warnf("buildGeistCamSources: no HELLO from feeder within 5s — "
-                         "interpose will fall back to Apple's default sim camera. "
+                         "source enumeration will fall back to Apple's default sim camera. "
                          "If you expected GeistCam to be active, ensure "
                          "GeistCamSession.start() runs before the app calls "
                          "AVCaptureDevice.devices.");
+        return NO;
+    }
+
+    BOOL hasConfiguredSlot = NO;
+    for (size_t i = 0; i < GEISTCAM_SLOT_COUNT; i++) {
+        if (configured[i]) {
+            hasConfiguredSlot = YES;
+            break;
+        }
+    }
+    if (!hasConfiguredSlot) {
+        geistcam_warnf("buildGeistCamSources: HELLO arrived but no slots configured — "
+                       "feeder attached no producers. Using Apple's camera sources.");
+        return NO;
+    }
+    if (resolveCMCaptureSymbols() != 0) return NO;
+    if (appleSources.count == 0 || patchVTableFromLiveSource((__bridge void *)appleSources.firstObject) != 0) {
+        geistcam_warnf("buildGeistCamSources: unable to prepare FigCaptureSource creation");
         return NO;
     }
 
@@ -290,45 +352,115 @@ static BOOL buildGeistCamSources(void) {
                           descriptors[i].pos, descriptors[i].media,
                           (int32_t)info.width, (int32_t)info.height, fps);
     }
-    if (s_sourceCount == 0) {
-        geistcam_warnf("buildGeistCamSources: HELLO arrived but no slots configured — "
-                         "feeder attached no producers. Returning empty source array.");
-    }
-    return s_sourceCount > 0;
+    return atomic_load_explicit(&s_sourceCount, memory_order_acquire) > 0;
 }
 
-static CFArrayRef s_cachedSourceArray;
+static NSArray *geistcam_copySources(id receiver, SEL selector, int32_t sourceType) NS_RETURNS_RETAINED {
+    return [g_sourceProvider copySourcesWithLoader:^NSArray *(BOOL *shouldCache) {
+        NSArray *appleSources = geistcam_copyOriginalSources(
+            g_sourceEnumeration,
+            receiver,
+            selector,
+            sourceType
+        );
+        geistcam_debugf("source enumeration: Apple's source count=%ld", (long)appleSources.count);
+        if (!buildGeistCamSources(appleSources)) {
+            geistcam_warnf("source enumeration: injected sources unavailable — using Apple's camera sources");
+            return appleSources;
+        }
+        int count = atomic_load_explicit(&s_sourceCount, memory_order_acquire);
+        const void *values[GEISTCAM_MAX_SOURCES];
+        for (int i = 0; i < count; i++) values[i] = s_sources[i].baseObj;
+        CFArrayRef injected = CFArrayCreate(
+            kCFAllocatorDefault,
+            values,
+            count,
+            &kCFTypeArrayCallBacks
+        );
+        *shouldCache = YES;
+        geistcam_debugf("source enumeration: returning %d injected source(s)", count);
+        return CFBridgingRelease(injected);
+    }];
+}
+
+static NSArray *geistcam_managerCopySources(id receiver, SEL selector, int32_t sourceType) NS_RETURNS_RETAINED {
+    return geistcam_copySources(receiver, selector, sourceType);
+}
 
 static CFArrayRef geistcam_FigCaptureSourceCopySources(void) {
-    if (!s_vtablePatched) {
-        CFArrayRef apple = FigCaptureSourceCopySources();
-        long count = apple ? CFArrayGetCount(apple) : -1;
-        geistcam_debugf("interpose: Apple's FigCaptureSourceCopySources -> count=%ld", count);
-        if (apple && count > 0) {
-            CFTypeRef src = CFArrayGetValueAtIndex(apple, 0);
-            patchVTableFromLiveSource((void *)src);
+    if (g_sourceEnumeration.mode != GeistCamSourceEnumerationModeLegacy) {
+        return FigCaptureSourceCopySources ? FigCaptureSourceCopySources() : NULL;
+    }
+    NSArray *sources = geistcam_copySources(nil, NULL, 0);
+    return sources ? CFBridgingRetain(sources) : NULL;
+}
+
+BOOL installSourceEnumerationHook(void) {
+    if (resolveCMCaptureSymbols() != 0) return NO;
+    g_sourceProvider = [GeistCamSerializedSourceProvider new];
+    GeistCamLegacyCopySourcesFn legacy = FigCaptureSourceCopySources
+        ? FigCaptureSourceCopySources
+        : NULL;
+    CFStringRef legacyAttributesKey = resolveCFStringConstant(
+        "kFigCaptureSourceProperty_AttributesDictionary"
+    );
+    CFStringRef modernAttributesKey = resolveCFStringConstant(
+        "kFigCaptureSourceProperty_Attributes"
+    );
+    GeistCamSourceAttributes modernAttributes = geistcam_resolveSourceAttributes(
+        NSClassFromString(@"FigCaptureSourceAttributes"),
+        NULL,
+        modernAttributesKey
+    );
+    if (modernAttributes.mode == GeistCamSourceAttributesModeModernObject) {
+        GeistCamSourceEnumeration modernEnumeration = geistcam_installSourceEnumerationHook(
+            NSClassFromString(@"FigCaptureSourceManager"),
+            NULL,
+            (IMP)geistcam_managerCopySources
+        );
+        if (modernEnumeration.mode == GeistCamSourceEnumerationModeManager) {
+            g_sourceAttributes = modernAttributes;
+            g_sourceEnumeration = modernEnumeration;
         }
-        if (apple) CFRelease(apple);
     }
-    if (s_cachedSourceArray) {
-        CFRetain(s_cachedSourceArray);
-        return s_cachedSourceArray;
+    if (g_sourceEnumeration.mode == GeistCamSourceEnumerationModeUnsupported) {
+        GeistCamSourceAttributes legacyAttributes = geistcam_resolveSourceAttributes(
+            Nil,
+            legacyAttributesKey,
+            NULL
+        );
+        GeistCamSourceEnumeration legacyEnumeration = geistcam_installSourceEnumerationHook(
+            Nil,
+            legacy,
+            (IMP)geistcam_managerCopySources
+        );
+        if (legacyAttributes.mode == GeistCamSourceAttributesModeLegacyDictionary &&
+            legacyEnumeration.mode == GeistCamSourceEnumerationModeLegacy) {
+            g_sourceAttributes = legacyAttributes;
+            g_sourceEnumeration = legacyEnumeration;
+        }
     }
-    if (!buildGeistCamSources() || s_sourceCount == 0) {
-        // No feeder connected within the HELLO timeout. Fall back to Apple's
-        // default sim camera (the standard test pattern) so the iOS app
-        // doesn't see an empty camera list. Happens when the Mac app crashed
-        // and the stranded DYLD_INSERT_LIBRARIES still loaded our shim, or
-        // when the lib's GeistCamSession.start() never got called.
-        geistcam_warnf("interpose: no GeistCam feeder — falling back to Apple's default sim camera");
-        return FigCaptureSourceCopySources();
+    if (g_sourceEnumeration.mode != GeistCamSourceEnumerationModeUnsupported) {
+        g_localizedNameKey = resolveCFStringConstant(
+            "kFigCaptureSourceAttributeKey_LocalizedName"
+        );
+        g_minFrameRateKey = resolveCFStringConstant(
+            "kFigCaptureSourceAttributeKey_MinFrameRate"
+        );
+        g_maxFrameRateKey = resolveCFStringConstant(
+            "kFigCaptureSourceAttributeKey_MaxFrameRate"
+        );
     }
-    const void *values[GEISTCAM_MAX_SOURCES];
-    for (int i = 0; i < s_sourceCount; i++) values[i] = s_sources[i].baseObj;
-    s_cachedSourceArray = CFArrayCreate(kCFAllocatorDefault, values, s_sourceCount, &kCFTypeArrayCallBacks);
-    geistcam_debugf("interpose: returning %d source(s)", s_sourceCount);
-    CFRetain(s_cachedSourceArray);
-    return s_cachedSourceArray;
+    switch (g_sourceEnumeration.mode) {
+        case GeistCamSourceEnumerationModeManager:
+            geistcam_marker("source enumeration: installed FigCaptureSourceManager hook");
+            return YES;
+        case GeistCamSourceEnumerationModeLegacy:
+            geistcam_marker("source enumeration: using FigCaptureSourceCopySources interpose");
+            return YES;
+        case GeistCamSourceEnumerationModeUnsupported:
+            return NO;
+    }
 }
 
 __attribute__((used))

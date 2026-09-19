@@ -55,6 +55,13 @@ let package = Package(
         ),
 
         .target(
+            name: "GeistCameraShimTestSupport",
+            dependencies: ["GeistCameraShimCore"],
+            path: "GeistLens/Tests/GeistCameraShimTestSupport",
+            publicHeadersPath: "include"
+        ),
+
+        .target(
             name: "GeistCamera",
             dependencies: ["GeistKit", "GeistCameraShimCore"],
             path: "GeistLens/Sources/GeistCamera",
@@ -63,7 +70,7 @@ let package = Package(
 
         .testTarget(
             name: "GeistCameraTests",
-            dependencies: ["GeistCamera", "GeistCameraShimCore"],
+            dependencies: ["GeistCamera", "GeistCameraShimCore", "GeistCameraShimTestSupport"],
             path: "GeistLens/Tests/GeistCameraTests",
             resources: [.process("Fixtures")]
         ),
