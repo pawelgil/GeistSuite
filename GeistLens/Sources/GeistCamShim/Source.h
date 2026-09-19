@@ -1,5 +1,5 @@
 // Mints synthetic FigCaptureSource instances with our CopyProperty/SetProperty
-// patched into the vtable, then interposes FigCaptureSourceCopySources so AVF
+// patched into the vtable, then hooks the runtime's source enumerator so AVF
 // discovers them. Per-frame dim mismatches are honored downstream, but the
 // device's advertised format stays constant so apps that cache it stay sane.
 
@@ -33,6 +33,7 @@ typedef struct GeistCamSource {
 
 #define GEISTCAM_MAX_SOURCES 3
 
+BOOL installSourceEnumerationHook(void);
 int simSourceCount(void);
 GeistCamSource *simSourceAtIndex(int i);
 GeistCamSource *findSourceByObj(void *obj);

@@ -6,17 +6,13 @@
 extern void *CMBaseObjectGetVTable(void *obj);
 extern void *CMBaseObjectGetDerivedStorage(void *obj);
 
-extern CFStringRef kFigCaptureSourceProperty_AttributesDictionary;
 extern CFStringRef kFigCaptureSourceProperty_Formats;
 extern CFStringRef kFigCaptureSourceAttributeKey_UniqueID;
 extern CFStringRef kFigCaptureSourceAttributeKey_DeviceType;
 extern CFStringRef kFigCaptureSourceAttributeKey_Position;
-extern CFStringRef kFigCaptureSourceAttributeKey_LocalizedName;
 extern CFStringRef kFigCaptureSourceAttributeKey_SourceType;
-extern CFStringRef kFigCaptureSourceAttributeKey_MinFrameRate;
-extern CFStringRef kFigCaptureSourceAttributeKey_MaxFrameRate;
 
-extern CFArrayRef FigCaptureSourceCopySources(void);
+extern CFArrayRef FigCaptureSourceCopySources(void) CF_RETURNS_RETAINED __attribute__((weak_import));
 
 typedef uint32_t CMBaseClassID;
 typedef int32_t (*CMDerivedObjectCreateFn)(CFAllocatorRef, const void *, CMBaseClassID, void *);

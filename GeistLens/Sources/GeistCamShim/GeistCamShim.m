@@ -11,6 +11,7 @@
 #import "RotationCoordinator.h"
 #import "Server.h"
 #import "Session.h"
+#import "Source.h"
 #import "Util.h"
 
 static void installAVFSwizzles(void) {
@@ -36,6 +37,10 @@ __attribute__((constructor))
 static void geistcam_init(void) {
     if (!hostAppHasCameraIntent()) return;
     geistcam_marker("dylib loaded");
+    if (!installSourceEnumerationHook()) {
+        geistcam_warnf("camera source enumeration unsupported — camera hooks disabled");
+        return;
+    }
     installAVFSwizzles();
     installLifecycleObservers();
     if (!startServerIfConfigured()) {
