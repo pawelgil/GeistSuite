@@ -1,4 +1,6 @@
 #import "Recording.h"
+#import "RecordingTimeline.h"
+#import "SampleRetiming.h"
 #import "Util.h"
 
 @implementation GeistCamMovieRecording
@@ -89,15 +91,6 @@ static BOOL startWriterIfNeeded(GeistCamMovieRecording *rec, GeistCamSource *src
     }
 }
 
-// Clamps loop-wraparounds and absurd jumps to one frame duration so the
-// writer-PTS stays monotonic across MP4 loops.
-static double advanceElapsed(double elapsed, CMTime lastSrc, CMTime curSrc, double frameDur) {
-    if (!CMTIME_IS_VALID(lastSrc)) return elapsed;
-    double delta = CMTimeGetSeconds(CMTimeSubtract(curSrc, lastSrc));
-    if (delta <= 0 || delta > 1.0) delta = frameDur;
-    return elapsed + delta;
-}
-
 void appendToRecording(GeistCamMovieRecording *rec, GeistCamSource *src,
                        CMSampleBufferRef sb, CMTime originalSrcPTS) {
     if (!rec || !rec.active) return;
@@ -107,13 +100,15 @@ void appendToRecording(GeistCamMovieRecording *rec, GeistCamSource *src,
     AVAssetWriterInput *input = isAudio ? rec.audioInput : rec.videoInput;
     if (!input || !input.isReadyForMoreMediaData) return;
 
-    double frameDur = CMTimeGetSeconds(CMSampleBufferGetDuration(sb));
-    if (frameDur <= 0 || frameDur > 1.0) {
-        frameDur = isAudio ? (1024.0 / 48000.0) : (src->frameRate > 0 ? 1.0 / src->frameRate : 1.0/30.0);
-    }
-    double elapsed = advanceElapsed(isAudio ? rec.audioElapsedSec : rec.videoElapsedSec,
-                                    isAudio ? rec.audioLastSrcPTS : rec.videoLastSrcPTS,
-                                    originalSrcPTS, frameDur);
+    CMTime sampleDuration = CMSampleBufferGetDuration(sb);
+    double frameDuration = isAudio
+        ? GeistCamRecordingAudioFrameDuration(sampleDuration)
+        : GeistCamRecordingVideoFrameDuration(sampleDuration, src->frameRate);
+    double elapsed = GeistCamRecordingAdvanceElapsed(
+        isAudio ? rec.audioElapsedSec : rec.videoElapsedSec,
+        isAudio ? rec.audioLastSrcPTS : rec.videoLastSrcPTS,
+        originalSrcPTS,
+        frameDuration);
     if (isAudio) {
         rec.audioElapsedSec = elapsed;
         rec.audioLastSrcPTS = originalSrcPTS;
@@ -122,13 +117,9 @@ void appendToRecording(GeistCamMovieRecording *rec, GeistCamSource *src,
         rec.videoLastSrcPTS = originalSrcPTS;
     }
 
-    CMSampleTimingInfo timing = {
-        .duration = CMSampleBufferGetDuration(sb),
-        .presentationTimeStamp = CMTimeAdd(rec.startPTS, CMTimeMakeWithSeconds(elapsed, 600)),
-        .decodeTimeStamp = kCMTimeInvalid,
-    };
-    CMSampleBufferRef restamped = NULL;
-    if (CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, sb, 1, &timing, &restamped) == 0 && restamped) {
+    CMSampleBufferRef restamped = GeistCamCopyRetimedUniformSampleBuffer(
+        sb, CMTimeAdd(rec.startPTS, CMTimeMakeWithSeconds(elapsed, 600)));
+    if (restamped) {
         [input appendSampleBuffer:restamped];
         CFRelease(restamped);
     }
