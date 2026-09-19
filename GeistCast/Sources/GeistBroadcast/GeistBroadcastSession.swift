@@ -124,6 +124,8 @@ public actor GeistBroadcastSession {
 
     private static let videoQueueCapacity = 1
     private static let audioQueueCapacity = 16
+    private static let audioQueueMaximumWeight = audioQueueCapacity * MicQueueWeight.maximumCost
+    private static let audioQueueMaximumCount = 256
 
     private var listenFD: Int32 = -1
     private var listenPathIdentity: SocketPathIdentity?
@@ -251,7 +253,10 @@ public actor GeistBroadcastSession {
         self.appShimDylibPath = appShimDylibPath
         self.extensionShimDylibPath = extensionShimDylibPath
         let videoQueue = BoundedFrameQueue<Data>(capacity: GeistBroadcastSession.videoQueueCapacity)
-        let micQueue = BoundedFrameQueue<Data>(capacity: GeistBroadcastSession.audioQueueCapacity)
+        let micQueue = BoundedFrameQueue<Data>(
+            maximumWeight: GeistBroadcastSession.audioQueueMaximumWeight,
+            maximumCount: GeistBroadcastSession.audioQueueMaximumCount
+        )
         self.videoQueue = videoQueue
         self.micQueue = micQueue
         self.sink = SessionBroadcastSink(videoQueue: videoQueue, micQueue: micQueue)
@@ -1189,38 +1194,24 @@ public actor GeistBroadcastSession {
         videoQueue: BoundedFrameQueue<Data>,
         micQueue: BoundedFrameQueue<Data>
     ) {
+        let scheduler = FrameQueueScheduler<Data>(maximumAudioBurst: audioQueueCapacity)
         while true {
             guard let iteration = token.performIfActive({
-                var wroteAny = false
-                var openCount = 0
-
-                switch micQueue.dequeue(timeoutSeconds: 0) {
-                case .received(let payload):
-                    if !writeAll(fd: fd, data: payload) { return (false, 0) }
-                    wroteAny = true
-                    openCount += 1
-                case .empty:
-                    openCount += 1
-                case .closed:
-                    break
+                scheduler.runIteration(
+                    audioQueue: micQueue,
+                    videoQueue: videoQueue
+                ) { payload in
+                    writeAll(fd: fd, data: payload)
                 }
-
-                switch videoQueue.dequeue(timeoutSeconds: 0) {
-                case .received(let payload):
-                    if !writeAll(fd: fd, data: payload) { return (false, 0) }
-                    wroteAny = true
-                    openCount += 1
-                case .empty:
-                    openCount += 1
-                case .closed:
-                    break
-                }
-                return (wroteAny, openCount)
             }) else { return }
 
-            if iteration.1 == 0 { return }
-            if !iteration.0 {
+            switch iteration {
+            case .finished:
+                return
+            case .idle:
                 usleep(5_000)
+            case .wroteFrames:
+                continue
             }
         }
     }
@@ -1279,7 +1270,12 @@ final class SessionBroadcastSink: BroadcastSink {
 
     func sendMicAudio(_ samples: AVAudioPCMBuffer) {
         guard let payload = Self.encodeAudio(samples, stream: .audioMic) else { return }
-        _ = micQueue.enqueueOrDropNewest(payload)
+        let weight = MicQueueWeight.cost(
+            encodedByteCount: payload.count,
+            frameCount: Int(samples.frameLength),
+            sampleRate: samples.format.sampleRate
+        )
+        _ = micQueue.enqueueOrDropNewest(payload, weight: weight)
     }
 
     private static func encodeVideo(_ pixelBuffer: CVPixelBuffer) -> Data? {

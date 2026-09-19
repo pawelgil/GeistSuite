@@ -1,6 +1,12 @@
 import Foundation
 
+// The condition lock protects entries, occupied weight, and closed state together.
 final class BoundedFrameQueue<Element: Sendable>: @unchecked Sendable {
+
+    private struct Entry {
+        let element: Element
+        let weight: Int
+    }
 
     enum EnqueueOutcome: Sendable, Equatable {
         case accepted
@@ -15,22 +21,34 @@ final class BoundedFrameQueue<Element: Sendable>: @unchecked Sendable {
     }
 
     private let condition = NSCondition()
-    private var items: [Element] = []
-    private let capacity: Int
+    private var items: [Entry] = []
+    private let maximumWeight: Int
+    private let maximumCount: Int
+    private var occupiedWeight = 0
     private var isClosed = false
 
-    init(capacity: Int) {
-        precondition(capacity > 0)
-        self.capacity = capacity
+    convenience init(capacity: Int) {
+        self.init(maximumWeight: capacity, maximumCount: capacity)
+    }
+
+    init(maximumWeight: Int, maximumCount: Int) {
+        precondition(maximumWeight > 0)
+        precondition(maximumCount > 0)
+        self.maximumWeight = maximumWeight
+        self.maximumCount = maximumCount
     }
 
     // Drop-newest matches how the system delivers to broadcast extensions:
     // the producer never waits.
-    func enqueueOrDropNewest(_ item: Element) -> EnqueueOutcome {
+    func enqueueOrDropNewest(_ item: Element, weight: Int = 1) -> EnqueueOutcome {
+        precondition(weight > 0)
         condition.lock(); defer { condition.unlock() }
         if isClosed { return .closed }
-        if items.count >= capacity { return .dropped }
-        items.append(item)
+        if items.count >= maximumCount || weight > maximumWeight - occupiedWeight {
+            return .dropped
+        }
+        items.append(Entry(element: item, weight: weight))
+        occupiedWeight += weight
         condition.broadcast()
         return .accepted
     }
@@ -42,15 +60,17 @@ final class BoundedFrameQueue<Element: Sendable>: @unchecked Sendable {
             if isClosed { return .closed }
             if !condition.wait(until: deadline) { return .empty }
         }
-        let item = items.removeFirst()
+        let entry = items.removeFirst()
+        occupiedWeight -= entry.weight
         condition.broadcast()
-        return .received(item)
+        return .received(entry.element)
     }
 
     func close() {
         condition.lock(); defer { condition.unlock() }
         isClosed = true
         items.removeAll()
+        occupiedWeight = 0
         condition.broadcast()
     }
 }
