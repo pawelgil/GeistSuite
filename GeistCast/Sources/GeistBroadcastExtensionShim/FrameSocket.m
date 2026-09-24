@@ -332,3 +332,29 @@ GCDeliveredSample GC_ReadNextSample(int fd, BOOL micUnreadyOverride) {
     free(payload);
     return result;
 }
+
+CMSampleBufferRef GC_CopySampleWithDataReadiness(CMSampleBufferRef sampleBuffer, BOOL ready) {
+    if (!sampleBuffer) return NULL;
+    CMBlockBufferRef data = CMSampleBufferGetDataBuffer(sampleBuffer);
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    CMItemCount sampleCount = CMSampleBufferGetNumSamples(sampleBuffer);
+    CMSampleTimingInfo timing;
+    OSStatus status = CMSampleBufferGetSampleTimingInfo(sampleBuffer, 0, &timing);
+    if (status != noErr) return NULL;
+    CMSampleBufferRef copy = NULL;
+    status = CMSampleBufferCreate(
+        kCFAllocatorDefault,
+        data,
+        ready,
+        NULL,
+        NULL,
+        format,
+        sampleCount,
+        1,
+        &timing,
+        0,
+        NULL,
+        &copy
+    );
+    return status == noErr ? copy : NULL;
+}

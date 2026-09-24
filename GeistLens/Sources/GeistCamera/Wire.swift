@@ -12,6 +12,8 @@ enum WireMessageType: UInt32 {
     case metadataResults  = 7   // feeder → shim
     case recordingState   = 8   // shim → feeder
     case activeFormat     = 9   // shim → feeder
+    case controlRequest   = 10  // feeder → shim (JSON)
+    case controlResponse  = 11  // shim → feeder (JSON)
 }
 
 enum WireMetaKind: UInt32 {

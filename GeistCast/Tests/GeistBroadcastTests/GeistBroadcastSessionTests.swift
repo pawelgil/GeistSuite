@@ -188,6 +188,36 @@ import Testing
     }
 
     @Test
+    func userPressedStart_loadsAdditionalExtensionDylibsBeforeTheLifecycleShim() async throws {
+        let additional = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString).path
+        let shim = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString).path
+        FileManager.default.createFile(atPath: additional, contents: Data())
+        FileManager.default.createFile(atPath: shim, contents: Data())
+        defer {
+            try? FileManager.default.removeItem(atPath: additional)
+            try? FileManager.default.removeItem(atPath: shim)
+        }
+        let spawner = SpySpawner()
+        let sut = createSUT(
+            spawner: spawner,
+            extensionShimDylibPath: shim,
+            additionalExtensionDylibPaths: [additional]
+        )
+        try await sut.start()
+        let fd = try connectClient(toSocketOf: sut)
+        defer { close(fd) }
+
+        try sendMessage(.helloHost, to: fd)
+        _ = try await readWireMessage(from: fd)
+        try sendMessage(.userPressedStart(micEnabled: false), to: fd)
+        await spawner.firstCall.wait()
+
+        #expect(spawner.calls.first?.env["DYLD_INSERT_LIBRARIES"] == "\(additional):\(shim)")
+
+        await sut.stop()
+    }
+
+    @Test
     func userPressedStart_whenExtensionShimDylibMissing_delegateReceivesBroadcastFailedToStart() async throws {
         let delegate = SpyDelegate()
         let sut = createSUT(
@@ -520,7 +550,8 @@ import Testing
         delegate: SpyDelegate? = nil,
         stager: any AppexStaging = FakeStager(),
         spawner: any AppexSpawning = SpySpawner(),
-        extensionShimDylibPath: String? = nil
+        extensionShimDylibPath: String? = nil,
+        additionalExtensionDylibPaths: [String] = []
     ) -> GeistBroadcastSession {
         GeistBroadcastSession(
             simulatorUDID: simulator,
@@ -533,7 +564,8 @@ import Testing
             stager: stager,
             spawner: spawner,
             appShimDylibPath: nil,
-            extensionShimDylibPath: extensionShimDylibPath
+            extensionShimDylibPath: extensionShimDylibPath,
+            additionalExtensionDylibPaths: additionalExtensionDylibPaths
         )
     }
 

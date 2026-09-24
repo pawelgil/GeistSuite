@@ -18,18 +18,39 @@ struct SpawnedAppex: Hashable, Sendable {
     let generation: UUID
     let pid: pid_t
     let birthIdentity: ProcessBirthIdentity?
+    let termination: ProcessTermination
 
     init(
         binaryPath: String,
         generation: UUID,
         pid: pid_t,
-        birthIdentity: ProcessBirthIdentity? = nil
+        birthIdentity: ProcessBirthIdentity? = nil,
+        termination: ProcessTermination = ProcessTermination()
     ) {
         self.binaryPath = binaryPath
         self.generation = generation
         self.pid = pid
         self.birthIdentity = birthIdentity
+        self.termination = termination
     }
+
+    static func == (lhs: SpawnedAppex, rhs: SpawnedAppex) -> Bool {
+        lhs.binaryPath == rhs.binaryPath && lhs.generation == rhs.generation && lhs.pid == rhs.pid
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(binaryPath)
+        hasher.combine(generation)
+        hasher.combine(pid)
+    }
+}
+
+final class ProcessTermination: Sendable {
+    private let status = Mutex<Int32?>(nil)
+
+    var value: Int32? { status.withLock { $0 } }
+
+    func record(_ value: Int32) { status.withLock { $0 = value } }
 }
 
 struct ProcessBirthIdentity: Hashable, Sendable {
@@ -56,7 +77,7 @@ final class AppexSpawner: AppexSpawning, Sendable {
         _ simulatorUDID: String,
         _ simctlSetPath: String?,
         _ environment: [String: String],
-        _ processTerminated: @escaping @Sendable () -> Void
+        _ processTerminated: @escaping @Sendable (Int32) -> Void
     ) async throws -> SpawnResult
 
     private struct TrackingState {
@@ -135,7 +156,7 @@ final class AppexSpawner: AppexSpawning, Sendable {
                 withPath: stagedBinary,
                 options: options,
                 terminationQueue: DispatchQueue.global(qos: .utility),
-                terminationHandler: { _ in processTerminated() } as @convention(block) (Int32) -> Void,
+                terminationHandler: { status in processTerminated(status) } as @convention(block) (Int32) -> Void,
                 pid: &pidValue,
                 error: &spawnErr
             )
@@ -168,6 +189,7 @@ final class AppexSpawner: AppexSpawning, Sendable {
         let stagedBinary = stagedAppex.binaryPath
         await killStale(stagedBinary: stagedBinary)
         let generation = UUID()
+        let termination = ProcessTermination()
         let lifetime = SpawnLifetime(stagedAppex: stagedAppex)
         tracking.withLock { $0.beginInstall(generation: generation) }
         let spawnResult: SpawnResult
@@ -177,7 +199,8 @@ final class AppexSpawner: AppexSpawning, Sendable {
                 simulatorUDID,
                 simctlSetPath,
                 environment,
-                { [weak self, lifetime] in
+                { [weak self, lifetime] status in
+                    termination.record(status)
                     lifetime.confirmTermination()
                     self?.processTerminated(
                         binaryPath: stagedBinary,
@@ -195,6 +218,7 @@ final class AppexSpawner: AppexSpawning, Sendable {
             generation: generation,
             pid: spawnResult.pid,
             birthIdentity: spawnResult.birthIdentity
+            , termination: termination
         )
         tracking.withLock { $0.finishInstall(process) }
         return process

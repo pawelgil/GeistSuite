@@ -14,6 +14,7 @@
 #import "Util.h"
 
 static void installAVFSwizzles(void) {
+    installLifecycleObservers();
     installSessionSwizzles();
     installPreviewSwizzles();
     installMovieFileSwizzles();
@@ -37,7 +38,6 @@ static void geistcam_init(void) {
     if (!hostAppHasCameraIntent()) return;
     geistcam_marker("dylib loaded");
     installAVFSwizzles();
-    installLifecycleObservers();
     if (!startServerIfConfigured()) {
         geistcam_warnf("no socket path — set GEISTCAM_SOCKET, or set "
                          "SIMULATOR_UDID + run inside a real simulator app");

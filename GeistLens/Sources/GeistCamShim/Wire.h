@@ -22,6 +22,8 @@ typedef enum {
     GEISTCAM_MSG_METADATA_RESULTS = 7,  // feeder → shim
     GEISTCAM_MSG_RECORDING_STATE  = 8,  // shim → feeder
     GEISTCAM_MSG_ACTIVE_FORMAT    = 9,  // shim → feeder
+    GEISTCAM_MSG_CONTROL_REQUEST  = 10, // feeder → shim (JSON)
+    GEISTCAM_MSG_CONTROL_RESPONSE = 11, // shim → feeder (JSON)
 } GeistCamMsgType;
 
 typedef enum {

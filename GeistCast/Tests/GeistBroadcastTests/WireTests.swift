@@ -168,7 +168,7 @@ struct WireDecoderTests {
 
         let messages = sut.feed(line(#"{"type":"pause"}"#))
 
-        #expect(messages == [.pause])
+        #expect(messages == [.pause()])
     }
 
     @Test
@@ -177,7 +177,7 @@ struct WireDecoderTests {
 
         let messages = sut.feed(line(#"{"type":"resume"}"#))
 
-        #expect(messages == [.resume])
+        #expect(messages == [.resume()])
     }
 
     @Test
@@ -269,8 +269,8 @@ private extension WireMessage {
         .userPressedStop,
         .begin(makeBroadcast()),
         .finish,
-        .pause,
-        .resume,
+        .pause(),
+        .resume(),
         .extensionTerminated(errorDomain: "Dom", errorCode: 42, errorMessage: "boom"),
         .setMicAudioReadiness(ready: false),
         .setMicAudioReadiness(ready: true),

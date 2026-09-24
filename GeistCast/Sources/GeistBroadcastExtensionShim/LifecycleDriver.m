@@ -30,8 +30,16 @@ NSString *GC_BroadcastEventLine(NSDictionary *broadcast, NSString *type) {
     return [line stringByAppendingString:@"\n"];
 }
 
+static NSString *ControlAckLine(NSString *requestID) {
+    NSDictionary *envelope = @{ @"type": @"control_ack", @"requestID": requestID ?: @"" };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
+    NSString *line = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return [line stringByAppendingString:@"\n"];
+}
+
 void GC_StopBroadcast(void) {
     if (!gBroadcastHandler) return;
+    id handler = gBroadcastHandler;
     GC_LOG("stopping broadcast");
     // Hard ceiling on teardown — real iOS SIGKILLs the extension if it
     // doesn't terminate cleanly within ~5s after broadcastFinished. 8s
@@ -43,7 +51,6 @@ void GC_StopBroadcast(void) {
         _exit(1);
     });
     GC_StopFeedThread();
-    id handler = gBroadcastHandler;
     gBroadcastHandler = nil;
     SEL finSel = sel_registerName("broadcastFinished");
     if ([handler respondsToSelector:finSel]) {
@@ -96,8 +103,10 @@ static void GC_FinishBroadcastSwizzled(id self_, SEL _cmd, NSError *error) {
     GC_LOG("intercepted finishBroadcastWithError: domain=%{public}@ code=%ld",
            error.domain, (long)error.code);
     GC_WriteControlLine(GC_ExtensionTerminatedLine(error));
-    GC_StopBroadcast();
-    _exit(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        GC_StopBroadcast();
+        _exit(0);
+    });
 }
 
 void GC_InstallFinishBroadcastSwizzle(void) {
@@ -221,6 +230,7 @@ void GC_StartLifecycleDriver(void) {
                     typedef void (*Fn)(id, SEL);
                     ((Fn)imp)(handler, pauseSel);
                 }
+                GC_WriteControlLine(ControlAckLine(msg[@"requestID"]));
                 continue;
             }
             if ([type isEqual:@"resume"]) {
@@ -232,12 +242,14 @@ void GC_StartLifecycleDriver(void) {
                     ((Fn)imp)(handler, resumeSel);
                 }
                 GC_SetFeedPaused(NO);
+                GC_WriteControlLine(ControlAckLine(msg[@"requestID"]));
                 continue;
             }
-            if ([type isEqual:@"set_mic_audio_readiness"]) {
-                BOOL ready = [msg[@"ready"] boolValue];
-                GC_LOG("received set_mic_audio_readiness ready=%d", ready);
-                GC_SetMicAudioReadiness(ready);
+            if ([type isEqual:@"set_mic_delivery"]) {
+                NSString *mode = msg[@"mode"] ?: @"normal";
+                GC_LOG("received set_mic_delivery mode=%{public}@", mode);
+                GC_SetMicDeliveryMode(mode);
+                GC_WriteControlLine(ControlAckLine(msg[@"requestID"]));
                 continue;
             }
             GC_LOG("ignoring unexpected %{public}@ message after start", type);

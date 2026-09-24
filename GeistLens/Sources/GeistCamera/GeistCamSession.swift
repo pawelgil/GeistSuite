@@ -16,6 +16,102 @@ public enum SourceSwitchError: Error {
     case recordingInProgress
 }
 
+public enum CameraInterruptionReason: String, Codable, CaseIterable, Sendable {
+    case audioDeviceInUseByAnotherClient
+    case sensitiveContentMitigationActivated
+    case videoDeviceInUseByAnotherClient
+    case videoDeviceNotAvailableDueToSystemPressure
+    case videoDeviceNotAvailableInBackground
+    case videoDeviceNotAvailableWithMultipleForegroundApps
+
+    var rawAVFoundationValue: Int {
+        switch self {
+        case .videoDeviceNotAvailableInBackground: 1
+        case .audioDeviceInUseByAnotherClient: 2
+        case .videoDeviceInUseByAnotherClient: 3
+        case .videoDeviceNotAvailableWithMultipleForegroundApps: 4
+        case .videoDeviceNotAvailableDueToSystemPressure: 5
+        case .sensitiveContentMitigationActivated: 6
+        }
+    }
+
+    static func from(rawAVFoundationValue value: Int) -> CameraInterruptionReason? {
+        allCases.first { $0.rawAVFoundationValue == value }
+    }
+}
+
+public struct CameraSessionSnapshot: Codable, Sendable, Equatable {
+    public let holdsCamera: Bool
+    public let id: String
+    public let inputs: [String]
+    public let interruptionReason: Int?
+    public let isInterrupted: Bool
+    public let isRunning: Bool
+    public let outputs: [String]
+    public let startOrder: Int?
+    public let startedAt: Date?
+
+    public init(
+        holdsCamera: Bool,
+        id: String,
+        inputs: [String],
+        interruptionReason: Int?,
+        isInterrupted: Bool,
+        isRunning: Bool,
+        outputs: [String],
+        startOrder: Int?,
+        startedAt: Date?
+    ) {
+        self.holdsCamera = holdsCamera
+        self.id = id
+        self.inputs = inputs
+        self.interruptionReason = interruptionReason
+        self.isInterrupted = isInterrupted
+        self.isRunning = isRunning
+        self.outputs = outputs
+        self.startOrder = startOrder
+        self.startedAt = startedAt
+    }
+}
+
+public struct CameraStatusSnapshot: Codable, Sendable, Equatable {
+    public let holder: String?
+    public let runningCount: Int
+    public let sessions: [CameraSessionSnapshot]
+
+    public init(holder: String?, runningCount: Int, sessions: [CameraSessionSnapshot]) {
+        self.holder = holder
+        self.runningCount = runningCount
+        self.sessions = sessions
+    }
+}
+
+public struct CameraInterruptionChange: Codable, Sendable, Equatable {
+    public struct Skipped: Codable, Sendable, Equatable {
+        public let reason: String
+        public let session: String
+
+        public init(reason: String, session: String) {
+            self.reason = reason
+            self.session = session
+        }
+    }
+
+    public let affected: [String]
+    public let skipped: [Skipped]
+
+    public init(affected: [String], skipped: [Skipped]) {
+        self.affected = affected
+        self.skipped = skipped
+    }
+}
+
+public struct CameraControlError: LocalizedError, Sendable {
+    public let message: String
+
+    public var errorDescription: String? { message }
+}
+
 public protocol GeistCamSessionDelegate: AnyObject, Sendable {
     func sessionDidConnect(_ session: GeistCamSession)
     func sessionDidDisconnect(_ session: GeistCamSession)
@@ -106,6 +202,7 @@ public actor GeistCamSession: SessionDriving {
     private var loggedActivationsWithoutSource: Set<CameraSlot> = []
     private var client: SocketClient?
     private var inboundTask: Task<Void, Never>?
+    private var pendingControlRequests: [String: CheckedContinuation<Data, Error>] = [:]
     public private(set) var state: State = .idle
     private nonisolated let isRecording = Atomic<Bool>(false)
 
@@ -374,6 +471,64 @@ public actor GeistCamSession: SessionDriving {
         cleanUpConnection(client: client, inboundTask: inboundTask)
     }
 
+    public func cameraStatus() async throws -> CameraStatusSnapshot {
+        let data = try await control(command: "status")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        do {
+            return try decoder.decode(CameraStatusSnapshot.self, from: data)
+        } catch {
+            throw CameraControlError(
+                message: "Camera status response was invalid: \(error). Payload: \(String(decoding: data, as: UTF8.self))"
+            )
+        }
+    }
+
+    public func endInterruption(session: String?) async throws -> CameraInterruptionChange {
+        let data = try await control(command: "endInterruption", session: session)
+        return try JSONDecoder().decode(CameraInterruptionChange.self, from: data)
+    }
+
+    public func interrupt(
+        reason: CameraInterruptionReason,
+        session: String?
+    ) async throws -> CameraInterruptionChange {
+        let data = try await control(
+            command: "interrupt",
+            reason: reason.rawAVFoundationValue,
+            session: session
+        )
+        return try JSONDecoder().decode(CameraInterruptionChange.self, from: data)
+    }
+
+    private func control(command: String, reason: Int? = nil, session: String? = nil) async throws -> Data {
+        guard let client else { throw GeistCamError.notStarted }
+        let requestID = UUID().uuidString
+        var request: [String: Any] = ["command": command, "requestID": requestID]
+        if let reason { request["reason"] = reason }
+        if let session { request["session"] = session }
+        let payload = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingControlRequests[requestID] = continuation
+            let admission = client.send(.reliable(type: .controlRequest, payload: payload))
+            guard admission == .accepted else {
+                pendingControlRequests.removeValue(forKey: requestID)
+                continuation.resume(throwing: GeistCamError.notStarted)
+                return
+            }
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                await self?.timeOutControl(requestID)
+            }
+        }
+    }
+
+    private func timeOutControl(_ requestID: String) {
+        pendingControlRequests.removeValue(forKey: requestID)?.resume(
+            throwing: CameraControlError(message: "Camera control request timed out")
+        )
+    }
+
     private func cleanUpConnection(client: SocketClient?, inboundTask: Task<Void, Never>?) {
         let active = runningProducers
         let prods = producers
@@ -556,9 +711,31 @@ public actor GeistCamSession: SessionDriving {
         case .activeFormat:
             guard let m = WireActiveFormat.decode(msg.payload) else { return }
             handleActiveFormatChanged(m)
+        case .controlResponse:
+            handleControlResponse(msg.payload)
         default:
             log.warn("unexpected inbound message \(msg.type)")
         }
+    }
+
+    private func handleControlResponse(_ payload: Data) {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+            let requestID = object["requestID"] as? String,
+            let continuation = pendingControlRequests.removeValue(forKey: requestID)
+        else { return }
+        if let error = object["error"] as? String {
+            continuation.resume(throwing: CameraControlError(message: error))
+            return
+        }
+        guard
+            let dataObject = object["data"],
+            let data = try? JSONSerialization.data(withJSONObject: dataObject, options: [.sortedKeys])
+        else {
+            continuation.resume(throwing: CameraControlError(message: "Camera control response had no data"))
+            return
+        }
+        continuation.resume(returning: data)
     }
 
     private func handleActiveFormatChanged(_ m: WireActiveFormat) {
@@ -694,6 +871,11 @@ public actor GeistCamSession: SessionDriving {
 
     private func handleDisconnected(client disconnectedClient: SocketClient) {
         if client === disconnectedClient {
+            let controls = pendingControlRequests.values
+            pendingControlRequests.removeAll()
+            for control in controls {
+                control.resume(throwing: GeistCamError.notStarted)
+            }
             state = .stopped
             cleanUpConnection(client: disconnectedClient, inboundTask: inboundTask)
         }

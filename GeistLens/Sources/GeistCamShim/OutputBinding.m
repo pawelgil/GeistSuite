@@ -6,26 +6,26 @@ const void *kGeistCamRecordingKey = &kGeistCamRecordingKey;
 const void *kGeistCamSampleDelegateKey = &kGeistCamSampleDelegateKey;
 const void *kGeistCamSampleQueueKey = &kGeistCamSampleQueueKey;
 
-static OutputBinding s_outputBindings[GEISTCAM_MAX_OUTPUTS];
-static int s_outputBindingCount = 0;
+@implementation GCOutputBinding
+@end
+
+static NSMutableArray<GCOutputBinding *> *s_outputBindings;
 static dispatch_queue_t s_outputBindingsQueue;
 
+static void ensureOutputBindings(void) {
+    if (s_outputBindingsQueue) return;
+    s_outputBindingsQueue = dispatch_queue_create("geistcam.outputBindings", DISPATCH_QUEUE_SERIAL);
+    s_outputBindings = [NSMutableArray array];
+}
+
 void rebuildOutputBindingsForSession(AVCaptureSession *session) {
-    if (!s_outputBindingsQueue) {
-        s_outputBindingsQueue = dispatch_queue_create("geistcam.outputBindings", DISPATCH_QUEUE_SERIAL);
-    }
+    if (isCameraSessionDeallocating(session)) return;
+    ensureOutputBindings();
     dispatch_sync(s_outputBindingsQueue, ^{
-        int kept = 0;
-        for (int i = 0; i < s_outputBindingCount; i++) {
-            if (s_outputBindings[i].session != session) {
-                if (kept != i) s_outputBindings[kept] = s_outputBindings[i];
-                kept++;
-            }
-        }
-        for (int i = kept; i < s_outputBindingCount; i++) {
-            s_outputBindings[i] = (OutputBinding){0};
-        }
-        s_outputBindingCount = kept;
+        NSIndexSet *stale = [s_outputBindings indexesOfObjectsPassingTest:^BOOL(GCOutputBinding *binding, NSUInteger idx, BOOL *stop) {
+            return binding.session == nil || binding.session == session;
+        }];
+        [s_outputBindings removeObjectsAtIndexes:stale];
 
         // AVCaptureMovieFileOutput has both a video and an audio connection;
         // each one needs its own binding so the pacing loop dispatches video
@@ -42,12 +42,13 @@ void rebuildOutputBindingsForSession(AVCaptureSession *session) {
                 }
                 if (already) continue;
                 if (seenCount < GEISTCAM_MAX_SOURCES) seenSources[seenCount++] = src;
-                if (s_outputBindingCount >= GEISTCAM_MAX_OUTPUTS) break;
-                s_outputBindings[s_outputBindingCount++] = (OutputBinding){
-                    .output = output,
-                    .source = src,
-                    .session = session,
-                };
+                if (s_outputBindings.count >= GEISTCAM_MAX_OUTPUTS) break;
+                GCOutputBinding *binding = [GCOutputBinding new];
+                binding.output = output;
+                binding.source = src;
+                binding.session = session;
+                binding.sessionID = cameraSessionIdentifier(session);
+                [s_outputBindings addObject:binding];
                 geistcam_markerf("bound output %s (%p) -> GeistCamSource[%d] '%s'",
                                   [NSStringFromClass([output class]) UTF8String],
                                   output, (int)src->kind, src->uniqueID.UTF8String);
@@ -56,30 +57,36 @@ void rebuildOutputBindingsForSession(AVCaptureSession *session) {
     });
 }
 
-int snapshotOutputBindings(OutputBinding *outBuf) {
-    if (!s_outputBindingsQueue) return 0;
-    __block int n = 0;
+void removeOutputBindingsForSessionID(NSString *sessionID) {
+    ensureOutputBindings();
     dispatch_sync(s_outputBindingsQueue, ^{
-        n = s_outputBindingCount;
-        for (int i = 0; i < n; i++) outBuf[i] = s_outputBindings[i];
+        NSIndexSet *matching = [s_outputBindings indexesOfObjectsPassingTest:^BOOL(GCOutputBinding *binding, NSUInteger idx, BOOL *stop) {
+            return [binding.sessionID isEqualToString:sessionID];
+        }];
+        [s_outputBindings removeObjectsAtIndexes:matching];
     });
-    return n;
+}
+
+NSArray<GCOutputBinding *> *snapshotOutputBindings(void) {
+    ensureOutputBindings();
+    __block NSArray<GCOutputBinding *> *snapshot;
+    dispatch_sync(s_outputBindingsQueue, ^{ snapshot = [s_outputBindings copy]; });
+    return snapshot;
 }
 
 BOOL isSourceActive(GeistCamSource *src) {
     if (isAppBackgrounded()) return NO;
-    OutputBinding bindings[GEISTCAM_MAX_OUTPUTS];
-    int n = snapshotOutputBindings(bindings);
-    for (int i = 0; i < n; i++) {
-        if (bindings[i].source != src) continue;
-        if (isSessionRunning(bindings[i].session)) return YES;
+    for (GCOutputBinding *binding in snapshotOutputBindings()) {
+        AVCaptureSession *session = binding.session;
+        if (binding.source != src || !session) continue;
+        if (isSessionDelivering(session)) return YES;
     }
     NSArray<AVCaptureSession *> *running = snapshotRunningSessions();
     for (AVCaptureSession *sess in running) {
         for (AVCaptureInput *input in sess.inputs) {
             if (![input isKindOfClass:[AVCaptureDeviceInput class]]) continue;
             NSString *uid = ((AVCaptureDeviceInput *)input).device.uniqueID;
-            if ([uid isEqualToString:src->uniqueID]) return YES;
+            if ([uid isEqualToString:src->uniqueID] && isSessionDelivering(sess)) return YES;
         }
     }
     return NO;

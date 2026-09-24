@@ -21,3 +21,4 @@ int GC_OpenFrameSocket(void);
 void GC_DropFrameClient(void);
 
 GCDeliveredSample GC_ReadNextSample(int fd, BOOL micUnreadyOverride);
+CMSampleBufferRef GC_CopySampleWithDataReadiness(CMSampleBufferRef sampleBuffer, BOOL ready);

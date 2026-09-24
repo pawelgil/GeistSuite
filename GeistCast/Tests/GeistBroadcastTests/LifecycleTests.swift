@@ -40,10 +40,11 @@ import Testing
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
         defer { close(extFD) }
 
-        try await sut.pause()
-
+        async let pause: Void = sut.pause()
         let message = try await readWireMessage(from: extFD)
-        #expect(message == .pause)
+        let requestID = try #require(pauseRequestID(message))
+        try sendMessage(.controlAck(requestID: requestID), to: extFD)
+        try await pause
 
         await sut.stop()
     }
@@ -56,49 +57,51 @@ import Testing
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
         defer { close(extFD) }
 
-        try await sut.pause()
-        try await sut.resume()
-
+        async let pause: Void = sut.pause()
         let first = try await readWireMessage(from: extFD)
+        let pauseID = try #require(pauseRequestID(first))
+        try sendMessage(.controlAck(requestID: pauseID), to: extFD)
+        try await pause
+
+        async let resume: Void = sut.resume()
         let second = try await readWireMessage(from: extFD)
-        #expect(first == .pause)
-        #expect(second == .resume)
+        let resumeID = try #require(resumeRequestID(second))
+        try sendMessage(.controlAck(requestID: resumeID), to: extFD)
+        try await resume
 
         await sut.stop()
     }
 
     @Test
-    func resume_whenBroadcastActiveButNotPaused_isNoOpWritingNothing() async throws {
+    func resume_whenBroadcastActiveButNotPaused_throwsNotPaused() async throws {
         let spy = SpyDelegate()
         let sut = createSUT(delegate: spy)
         try await sut.start()
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
         defer { close(extFD) }
 
-        try await sut.resume()
-
-        await #expect(throws: SocketReadError.timeout) {
-            _ = try await readWireMessage(from: extFD, timeoutSeconds: 0.3)
+        await #expect(throws: GeistBroadcastSession.SessionError.notPaused) {
+            try await sut.resume()
         }
 
         await sut.stop()
     }
 
     @Test
-    func pause_calledTwiceWhileActive_writesPauseOnlyOnce() async throws {
+    func pause_calledTwiceWhileActive_throwsAlreadyPaused() async throws {
         let spy = SpyDelegate()
         let sut = createSUT(delegate: spy)
         try await sut.start()
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
         defer { close(extFD) }
 
-        try await sut.pause()
-        try await sut.pause()
-
+        async let pause: Void = sut.pause()
         let first = try await readWireMessage(from: extFD)
-        #expect(first == .pause)
-        await #expect(throws: SocketReadError.timeout) {
-            _ = try await readWireMessage(from: extFD, timeoutSeconds: 0.3)
+        let requestID = try #require(pauseRequestID(first))
+        try sendMessage(.controlAck(requestID: requestID), to: extFD)
+        try await pause
+        await #expect(throws: GeistBroadcastSession.SessionError.alreadyPaused) {
+            try await sut.pause()
         }
 
         await sut.stop()
@@ -126,7 +129,24 @@ import Testing
         #expect(termination.error.code == 42)
         #expect(termination.error.message == "boom")
         #expect(await sut.activeBroadcasts.isEmpty)
+        #expect(await sut.lastBroadcastEndedNormally == false)
 
+        await sut.stop()
+    }
+
+    @Test
+    func broadcastEndedEnvelope_marksBroadcastAsNormallyEnded() async throws {
+        let spy = SpyDelegate()
+        let sut = createSUT(delegate: spy)
+        try await sut.start()
+        let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
+        defer { close(extFD) }
+
+        let broadcast = try #require(spy.starts.first)
+        try sendMessage(.broadcastEnded(broadcast), to: extFD)
+        await spy.broadcastEndedSignal.wait()
+
+        #expect(await sut.lastBroadcastEndedNormally == true)
         await sut.stop()
     }
 
@@ -184,6 +204,7 @@ import Testing
         #expect(spy.ends.count == 1)
         #expect(spy.terminations.isEmpty)
         #expect(await sut.activeBroadcasts.isEmpty)
+        #expect(await sut.lastBroadcastEndedNormally == false)
 
         await sut.stop()
     }
@@ -214,6 +235,22 @@ import Testing
                 == .extensionDiedBeforeStart)
 
         spawner.release()
+        await sut.stop()
+    }
+
+    @Test
+    func extensionProcessID_usesConnectedExtensionPeerBeforeSpawnCompletes() async throws {
+        let spy = SpyDelegate()
+        let sut = createSUT(delegate: spy)
+        try await sut.start()
+
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
+        await spy.extensionConnected.wait()
+
+        #expect(await sut.extensionProcessID == getpid())
+
         await sut.stop()
     }
 
@@ -334,6 +371,16 @@ import Testing
         try sendBytes(Array(data), to: fd)
     }
 
+    private func pauseRequestID(_ message: WireMessage) -> String? {
+        guard case let .pause(requestID) = message else { return nil }
+        return requestID
+    }
+
+    private func resumeRequestID(_ message: WireMessage) -> String? {
+        guard case let .resume(requestID) = message else { return nil }
+        return requestID
+    }
+
     private func sendBytes(_ bytes: [UInt8], to fd: Int32) throws {
         var written = 0
         while written < bytes.count {
@@ -367,6 +414,7 @@ private final class SpyDelegate: GeistBroadcastSessionDelegate, @unchecked Senda
     private var _terminations: [TerminationCapture] = []
     private var _failures: [FailureCapture] = []
     private var _ends: [Broadcast] = []
+    private var _starts: [Broadcast] = []
     let extensionConnected = AsyncSignal()
     let broadcastStartedSignal = AsyncSignal()
     let broadcastEndedSignal = AsyncSignal()
@@ -376,12 +424,14 @@ private final class SpyDelegate: GeistBroadcastSessionDelegate, @unchecked Senda
     var terminations: [TerminationCapture] { lock.withLock { _terminations } }
     var failures: [FailureCapture] { lock.withLock { _failures } }
     var ends: [Broadcast] { lock.withLock { _ends } }
+    var starts: [Broadcast] { lock.withLock { _starts } }
 
     func session(_: GeistBroadcastSession, extensionConnectedFor _: String) {
         extensionConnected.fire()
     }
 
-    func session(_: GeistBroadcastSession, broadcastStarted _: Broadcast) {
+    func session(_: GeistBroadcastSession, broadcastStarted broadcast: Broadcast) {
+        lock.withLock { _starts.append(broadcast) }
         broadcastStartedSignal.fire()
     }
 

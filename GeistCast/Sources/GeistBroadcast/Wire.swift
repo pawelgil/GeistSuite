@@ -131,9 +131,11 @@ enum WireMessage: Equatable, Sendable {
     case userPressedStop
     case begin(Broadcast)
     case finish
-    case pause
-    case resume
+    case pause(requestID: String = "")
+    case resume(requestID: String = "")
+    case controlAck(requestID: String)
     case extensionTerminated(errorDomain: String, errorCode: Int, errorMessage: String)
+    case setMicDelivery(mode: String, requestID: String)
     case setMicAudioReadiness(ready: Bool)
     case userToggledMic(enabled: Bool)
 }
@@ -183,11 +185,20 @@ struct WireDecoder {
         case "finish":
             return .finish
         case "pause":
-            return .pause
+            return .pause(requestID: json["requestID"] as? String ?? "")
         case "resume":
-            return .resume
+            return .resume(requestID: json["requestID"] as? String ?? "")
+        case "control_ack":
+            guard let requestID = json["requestID"] as? String else { return nil }
+            return .controlAck(requestID: requestID)
         case "extension_terminated":
             return decodeExtensionTerminated(json)
+        case "set_mic_delivery":
+            guard
+                let mode = json["mode"] as? String,
+                let requestID = json["requestID"] as? String
+            else { return nil }
+            return .setMicDelivery(mode: mode, requestID: requestID)
         case "set_mic_audio_readiness":
             guard let ready = json["ready"] as? Bool else { return nil }
             return .setMicAudioReadiness(ready: ready)
@@ -298,10 +309,12 @@ struct WireEncoder {
             return broadcastObject(b, type: "begin")
         case .finish:
             return ["type": "finish"]
-        case .pause:
-            return ["type": "pause"]
-        case .resume:
-            return ["type": "resume"]
+        case .pause(let requestID):
+            return requestID.isEmpty ? ["type": "pause"] : ["type": "pause", "requestID": requestID]
+        case .resume(let requestID):
+            return requestID.isEmpty ? ["type": "resume"] : ["type": "resume", "requestID": requestID]
+        case .controlAck(let requestID):
+            return ["type": "control_ack", "requestID": requestID]
         case .extensionTerminated(let domain, let code, let message):
             return [
                 "type": "extension_terminated",
@@ -309,6 +322,8 @@ struct WireEncoder {
                 "errorCode": code,
                 "errorMessage": message,
             ]
+        case .setMicDelivery(let mode, let requestID):
+            return ["type": "set_mic_delivery", "mode": mode, "requestID": requestID]
         case .setMicAudioReadiness(let ready):
             return ["type": "set_mic_audio_readiness", "ready": ready]
         case .userToggledMic(let enabled):

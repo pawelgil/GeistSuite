@@ -166,6 +166,118 @@ struct GeistCamSessionTests {
         await session.stop()
         #expect(stopped)
     }
+
+    @Test func cameraStatus_roundTripsStructuredShimResponse() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+
+        let request = Task { try await session.cameraStatus() }
+        let inbound = try #require(await server.firstInbound(matching: .controlRequest, timeout: 2))
+        let envelope = try controlEnvelope(from: inbound.payload)
+        server.send(.controlResponse, payload: try controlResponse(
+            requestID: try #require(envelope["requestID"] as? String),
+            data: [
+                "holder": "session-a",
+                "runningCount": 1,
+                "sessions": [[
+                    "holdsCamera": true,
+                    "id": "session-a",
+                    "inputs": ["backCamera", "microphone"],
+                    "isInterrupted": false,
+                    "isRunning": true,
+                    "outputs": ["AVCaptureVideoDataOutput"],
+                    "startOrder": 1,
+                    "startedAt": 1000,
+                ]],
+            ]
+        ))
+
+        let status = try await request.value
+        await session.stop()
+
+        #expect(envelope["command"] as? String == "status")
+        #expect(status.holder == "session-a")
+        #expect(status.runningCount == 1)
+        #expect(status.sessions.first?.inputs == ["backCamera", "microphone"])
+    }
+
+    @Test func cameraStatus_decodesEmptyStatusWithAbsentOptionals() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+
+        let request = Task { try await session.cameraStatus() }
+        let inbound = try #require(await server.firstInbound(matching: .controlRequest, timeout: 2))
+        let envelope = try controlEnvelope(from: inbound.payload)
+        server.send(.controlResponse, payload: try controlResponse(
+            requestID: try #require(envelope["requestID"] as? String),
+            data: ["runningCount": 0, "sessions": []]
+        ))
+
+        let status = try await request.value
+        await session.stop()
+
+        #expect(status.holder == nil)
+        #expect(status.runningCount == 0)
+        #expect(status.sessions.isEmpty)
+    }
+
+    @Test func interrupt_forwardsNamedReasonAndTargetAndDecodesSkips() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+
+        let request = Task {
+            try await session.interrupt(reason: .audioDeviceInUseByAnotherClient, session: "session-b")
+        }
+        let inbound = try #require(await server.firstInbound(matching: .controlRequest, timeout: 2))
+        let envelope = try controlEnvelope(from: inbound.payload)
+        server.send(.controlResponse, payload: try controlResponse(
+            requestID: try #require(envelope["requestID"] as? String),
+            data: [
+                "affected": ["session-b"],
+                "skipped": [["reason": "already interrupted", "session": "session-a"]],
+            ]
+        ))
+
+        let change = try await request.value
+        await session.stop()
+
+        #expect(envelope["command"] as? String == "interrupt")
+        #expect(envelope["reason"] as? Int == 2)
+        #expect(envelope["session"] as? String == "session-b")
+        #expect(change.affected == ["session-b"])
+        #expect(change.skipped == [.init(reason: "already interrupted", session: "session-a")])
+    }
+
+    @Test func cameraControl_surfacesShimErrorMessage() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        try await session.start(connectTimeout: 2)
+        _ = await server.firstInbound(matching: .hello, timeout: 2)
+
+        let request = Task { try await session.endInterruption(session: "stopped") }
+        let inbound = try #require(await server.firstInbound(matching: .controlRequest, timeout: 2))
+        let envelope = try controlEnvelope(from: inbound.payload)
+        server.send(.controlResponse, payload: try JSONSerialization.data(withJSONObject: [
+            "error": "Camera session stopped is not running",
+            "ok": false,
+            "requestID": try #require(envelope["requestID"] as? String),
+        ]))
+
+        await #expect(throws: CameraControlError.self) {
+            try await request.value
+        }
+        await session.stop()
+    }
 }
 
 // MARK: - Helpers
@@ -206,6 +318,18 @@ private func makeActiveFormatPayload(slot: UInt32, width: UInt32, height: UInt32
     d.appendLE(height)
     d.appendLE(pixelFormat)
     return d
+}
+
+private func controlEnvelope(from data: Data) throws -> [String: Any] {
+    try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+}
+
+private func controlResponse(requestID: String, data: [String: Any]) throws -> Data {
+    try JSONSerialization.data(withJSONObject: [
+        "data": data,
+        "ok": true,
+        "requestID": requestID,
+    ])
 }
 
 // MARK: - Test Doubles

@@ -122,7 +122,7 @@ void deliverFrameToPreviewLayers(CMSampleBufferRef sb, GeistCamSource *src) {
     for (AVCaptureVideoPreviewLayer *layer in layers) {
         if (bindingForPreviewLayer(layer) != src) continue;
         AVCaptureSession *sess = layer.session;
-        if (!isSessionRunning(sess)) continue;
+        if (!isSessionDelivering(sess)) continue;
         AVSampleBufferDisplayLayer *display = objc_getAssociatedObject(layer, kGeistCamDisplayLayerKey);
         if (!display) continue;
         if (!display.sampleBufferRenderer.isReadyForMoreMediaData) {

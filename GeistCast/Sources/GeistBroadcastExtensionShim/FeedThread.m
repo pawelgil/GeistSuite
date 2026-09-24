@@ -11,8 +11,9 @@
 
 static id gBroadcastHandler = nil;
 static volatile atomic_bool gFeedRunning = ATOMIC_VAR_INIT(false);
-static volatile atomic_bool gFeedPaused = ATOMIC_VAR_INIT(false);
-static volatile atomic_bool gMicUnready = ATOMIC_VAR_INIT(false);
+static BOOL gFeedPaused = NO;
+static NSInteger gMicDeliveryMode = 0;
+static pthread_mutex_t gDeliveryLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t gFeedThread;
 static int64_t gFrameCount = 0;
 
@@ -27,8 +28,7 @@ static void *FeedThreadMain(void *arg) {
     while (atomic_load(&gFeedRunning)) {
         if (!gBroadcastHandler) break;
         @autoreleasepool {
-            BOOL micUnready = atomic_load(&gMicUnready);
-            GCDeliveredSample delivered = GC_ReadNextSample(fd, micUnready);
+            GCDeliveredSample delivered = GC_ReadNextSample(fd, NO);
             if (!delivered.sampleBuffer) {
                 if (!atomic_load(&gFeedRunning)) break;
                 GC_ERR("read next sample failed; backing off 200ms");
@@ -40,9 +40,19 @@ static void *FeedThreadMain(void *arg) {
                 }
                 continue;
             }
-            if (atomic_load(&gFeedPaused)) {
+            pthread_mutex_lock(&gDeliveryLock);
+            BOOL withheldMic = gMicDeliveryMode == 2 && delivered.type == GCFeedSampleBufferTypeAudioMic;
+            if (gFeedPaused || withheldMic) {
                 CFRelease(delivered.sampleBuffer);
+                pthread_mutex_unlock(&gDeliveryLock);
                 continue;
+            }
+            if (gMicDeliveryMode == 1 && delivered.type == GCFeedSampleBufferTypeAudioMic) {
+                CMSampleBufferRef unready = GC_CopySampleWithDataReadiness(delivered.sampleBuffer, NO);
+                if (unready) {
+                    CFRelease(delivered.sampleBuffer);
+                    delivered.sampleBuffer = unready;
+                }
             }
             id handler = gBroadcastHandler;
             SEL sel = sel_registerName("processSampleBuffer:withType:");
@@ -58,6 +68,7 @@ static void *FeedThreadMain(void *arg) {
                 }
             }
             CFRelease(delivered.sampleBuffer);
+            pthread_mutex_unlock(&gDeliveryLock);
         }
     }
     GC_LOG("feed thread exiting after %lld samples", gFrameCount);
@@ -67,8 +78,10 @@ static void *FeedThreadMain(void *arg) {
 void GC_StartFeedThread(id broadcastHandler) {
     gBroadcastHandler = broadcastHandler;
     gFrameCount = 0;
-    atomic_store(&gFeedPaused, false);
-    atomic_store(&gMicUnready, false);
+    pthread_mutex_lock(&gDeliveryLock);
+    gFeedPaused = NO;
+    gMicDeliveryMode = 0;
+    pthread_mutex_unlock(&gDeliveryLock);
     atomic_store(&gFeedRunning, true);
     pthread_create(&gFeedThread, NULL, FeedThreadMain, NULL);
 }
@@ -87,9 +100,19 @@ void GC_StopFeedThread(void) {
 }
 
 void GC_SetFeedPaused(BOOL paused) {
-    atomic_store(&gFeedPaused, paused ? true : false);
+    pthread_mutex_lock(&gDeliveryLock);
+    gFeedPaused = paused;
+    pthread_mutex_unlock(&gDeliveryLock);
 }
 
-void GC_SetMicAudioReadiness(BOOL ready) {
-    atomic_store(&gMicUnready, ready ? false : true);
+void GC_SetMicDeliveryMode(NSString *mode) {
+    pthread_mutex_lock(&gDeliveryLock);
+    if ([mode isEqualToString:@"notReady"]) {
+        gMicDeliveryMode = 1;
+    } else if ([mode isEqualToString:@"withheld"]) {
+        gMicDeliveryMode = 2;
+    } else {
+        gMicDeliveryMode = 0;
+    }
+    pthread_mutex_unlock(&gDeliveryLock);
 }

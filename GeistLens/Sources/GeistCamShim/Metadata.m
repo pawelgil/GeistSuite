@@ -39,14 +39,13 @@ static pthread_mutex_t s_demandMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static SlotDemand computeDemandForSlot(GeistCamSlot slot) {
     SlotDemand d = {0};
-    OutputBinding bindings[GEISTCAM_MAX_OUTPUTS];
-    int n = snapshotOutputBindings(bindings);
     Class metaCls = NSClassFromString(@"AVCaptureMetadataOutput");
-    for (int i = 0; i < n; i++) {
-        GeistCamSource *src = bindings[i].source;
+    for (GCOutputBinding *binding in snapshotOutputBindings()) {
+        GeistCamSource *src = binding.source;
+        AVCaptureSession *session = binding.session;
         if (!src || (GeistCamSlot)src->kind != slot) continue;
-        if (!isSessionRunning(bindings[i].session)) continue;
-        id output = bindings[i].output;
+        if (!session || !isSessionDelivering(session)) continue;
+        id output = binding.output;
         if (!output || ![output isKindOfClass:metaCls]) continue;
         id delegate = objc_getAssociatedObject(output, kMetaDelegateKey);
         if (!delegate) continue;
@@ -239,14 +238,12 @@ void metadataDispatchVideoFrame(CMSampleBufferRef sb, GeistCamSource *src) {
 }
 
 static void deliverMetadataObjects(NSArray *avObjects, GeistCamSource *src) {
-    OutputBinding bindings[GEISTCAM_MAX_OUTPUTS];
-    int n = snapshotOutputBindings(bindings);
     Class metaCls = NSClassFromString(@"AVCaptureMetadataOutput");
-    for (int i = 0; i < n; i++) {
-        if (bindings[i].source != src) continue;
-        if (!isSessionRunning(bindings[i].session)) continue;
-        id output = bindings[i].output;
-        if (!output || ![output isKindOfClass:metaCls]) continue;
+    for (GCOutputBinding *binding in snapshotOutputBindings()) {
+        AVCaptureSession *session = binding.session;
+        id output = binding.output;
+        if (binding.source != src || !session || !output) continue;
+        if (!isSessionDelivering(session) || ![output isKindOfClass:metaCls]) continue;
         id delegate = objc_getAssociatedObject(output, kMetaDelegateKey);
         dispatch_queue_t queue = objc_getAssociatedObject(output, kMetaQueueKey);
         NSArray<AVMetadataObjectType> *types = objc_getAssociatedObject(output, kMetaTypesKey);
@@ -260,16 +257,24 @@ static void deliverMetadataObjects(NSArray *avObjects, GeistCamSource *src) {
         }
 
         AVCaptureConnection *conn = [[output performSelector:@selector(connections)] firstObject];
-        id outputRetained = output;
         id delegateRetained = delegate;
-        AVCaptureConnection *connRetained = conn;
+        __weak AVCaptureSession *weakSession = session;
+        __weak id weakOutput = output;
+        __weak AVCaptureConnection *weakConnection = conn;
         NSArray *toShip = [filtered copy];
+        uint64_t generation = sessionDeliveryGeneration(session);
         dispatch_async(queue, ^{
+            AVCaptureSession *liveSession = weakSession;
+            id liveOutput = weakOutput;
+            AVCaptureConnection *liveConnection = weakConnection;
+            if (!liveSession || !liveOutput || !liveConnection ||
+                !beginSessionDelivery(liveSession, generation)) return;
             SEL sel = @selector(captureOutput:didOutputMetadataObjects:fromConnection:);
             if ([delegateRetained respondsToSelector:sel]) {
                 void (*fn)(id, SEL, id, NSArray *, AVCaptureConnection *) = (void *)objc_msgSend;
-                fn(delegateRetained, sel, outputRetained, toShip, connRetained);
+                fn(delegateRetained, sel, liveOutput, toShip, liveConnection);
             }
+            endSessionDelivery(liveSession);
         });
     }
 }

@@ -6,6 +6,7 @@
 #import "PreviewLayer.h"
 #import "Provenance.h"
 #import "RecordingState.h"
+#import "Session.h"
 #import "Source.h"
 #import "Util.h"
 #import "Wire.h"
@@ -228,6 +229,17 @@ static void readLoop(int fd) {
             }
             case GEISTCAM_MSG_METADATA_RESULTS: {
                 metadataHandleResultsMessage(payload, payloadLen);
+                break;
+            }
+            case GEISTCAM_MSG_CONTROL_REQUEST: {
+                NSData *data = [NSData dataWithBytes:payload length:payloadLen];
+                NSDictionary *request = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+                if (![request isKindOfClass:[NSDictionary class]]) break;
+                NSDictionary *response = cameraHandleControlRequest(request);
+                NSData *encoded = [NSJSONSerialization dataWithJSONObject:response options:0 error:NULL];
+                if (encoded) {
+                    serverWriteMessage(GEISTCAM_MSG_CONTROL_RESPONSE, encoded.bytes, encoded.length);
+                }
                 break;
             }
             default:

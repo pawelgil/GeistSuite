@@ -45,7 +45,7 @@ struct AppexSpawnerTests {
         let killer = ProcessKillRecorder()
         let sut = AppexSpawner(
             spawnOperation: { _, _, _, _, processTerminated in
-                processTerminated()
+                processTerminated(0)
                 return AppexSpawner.SpawnResult(pid: 1, birthIdentity: nil)
             },
             processKiller: killer.record
@@ -275,7 +275,7 @@ private final class FakeSpawnBoundary: Sendable {
     }
 
     private struct State {
-        var callbacks: [@Sendable () -> Void] = []
+        var callbacks: [@Sendable (Int32) -> Void] = []
     }
 
     static let binaryPath = "/private/tmp/Test.appex/Binary"
@@ -294,7 +294,7 @@ private final class FakeSpawnBoundary: Sendable {
         simulatorUDID _: String,
         simctlSetPath _: String?,
         environment _: [String: String],
-        processTerminated: @escaping @Sendable () -> Void
+        processTerminated: @escaping @Sendable (Int32) -> Void
     ) async throws -> AppexSpawner.SpawnResult {
         let call = state.withLock { state -> Int in
             state.callbacks.append(processTerminated)
@@ -302,7 +302,7 @@ private final class FakeSpawnBoundary: Sendable {
         }
         switch outcome {
         case .callbackBeforeReturn:
-            processTerminated()
+            processTerminated(0)
         case .failure:
             throw Failure.spawn
         case .success:
@@ -316,7 +316,7 @@ private final class FakeSpawnBoundary: Sendable {
 
     func terminate(call: Int) {
         let callback = state.withLock { $0.callbacks[call] }
-        callback()
+        callback(0)
     }
 }
 
@@ -338,7 +338,7 @@ private actor GatedSpawnBoundary {
     static let binaryPath = "/tmp/Test.appex/Binary"
 
     private let firstSpawnGate = AsyncSignal()
-    private var processTerminations: [@Sendable () -> Void] = []
+    private var processTerminations: [@Sendable (Int32) -> Void] = []
     private var spawnCount = 0
     let firstSpawnEntered = AsyncSignal()
 
@@ -348,7 +348,7 @@ private actor GatedSpawnBoundary {
 
     func spawn(
         path _: String,
-        processTerminated: @escaping @Sendable () -> Void
+        processTerminated: @escaping @Sendable (Int32) -> Void
     ) async -> AppexSpawner.SpawnResult {
         spawnCount += 1
         let call = spawnCount
@@ -364,6 +364,6 @@ private actor GatedSpawnBoundary {
     }
 
     func terminateFirstProcess() {
-        processTerminations.first?()
+        processTerminations.first?(0)
     }
 }

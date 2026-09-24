@@ -34,13 +34,12 @@ void deliverToBoundOutputs(GeistCamSource *src, CMSampleBufferRef sb, CMTime ori
         if (oldFD) CFRelease(oldFD);
     }
 
-    OutputBinding bindings[GEISTCAM_MAX_OUTPUTS];
-    int n = snapshotOutputBindings(bindings);
-    for (int i = 0; i < n; i++) {
-        if (bindings[i].source != src) continue;
-        if (!isSessionRunning(bindings[i].session)) continue;
-        id output = bindings[i].output;
-        if (!output) continue;
+    for (GCOutputBinding *binding in snapshotOutputBindings()) {
+        AVCaptureSession *session = binding.session;
+        id output = binding.output;
+        if (binding.source != src || !session || !output) continue;
+        if (!isSessionDelivering(session)) continue;
+        uint64_t generation = sessionDeliveryGeneration(session);
 
         AVCaptureConnection *videoConn = (src->kind != GeistCamSourceKind_Audio)
             ? firstVideoConnectionForOutput(output) : nil;
@@ -51,7 +50,10 @@ void deliverToBoundOutputs(GeistCamSource *src, CMSampleBufferRef sb, CMTime ori
 
         if ([output isKindOfClass:NSClassFromString(@"AVCaptureMovieFileOutput")]) {
             GeistCamMovieRecording *rec = objc_getAssociatedObject(output, kGeistCamRecordingKey);
-            if (rec && rec.active) appendToRecording(rec, src, toDeliver, originalSrcPTS);
+            if (rec && rec.active && beginSessionDelivery(session, generation)) {
+                appendToRecording(rec, src, toDeliver, originalSrcPTS);
+                endSessionDelivery(session);
+            }
         } else if ([output isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")] ||
                    [output isKindOfClass:NSClassFromString(@"AVCaptureAudioDataOutput")]) {
             id delegate = objc_getAssociatedObject(output, kGeistCamSampleDelegateKey);
@@ -61,13 +63,24 @@ void deliverToBoundOutputs(GeistCamSource *src, CMSampleBufferRef sb, CMTime ori
                 CFRetain(toDeliver);
                 CMSampleBufferRef sbRetained = toDeliver;
                 id delegateRetained = delegate;
-                id outputRetained = output;
+                __weak AVCaptureSession *weakSession = session;
+                __weak id weakOutput = output;
+                __weak AVCaptureConnection *weakConnection = conn;
                 dispatch_async(queue, ^{
+                    AVCaptureSession *liveSession = weakSession;
+                    id liveOutput = weakOutput;
+                    AVCaptureConnection *liveConnection = weakConnection;
+                    if (!liveSession || !liveOutput || !liveConnection ||
+                        !beginSessionDelivery(liveSession, generation)) {
+                        CFRelease(sbRetained);
+                        return;
+                    }
                     SEL sel = @selector(captureOutput:didOutputSampleBuffer:fromConnection:);
                     if ([delegateRetained respondsToSelector:sel]) {
                         void (*fn)(id, SEL, id, CMSampleBufferRef, AVCaptureConnection *) = (void *)objc_msgSend;
-                        fn(delegateRetained, sel, outputRetained, sbRetained, conn);
+                        fn(delegateRetained, sel, liveOutput, sbRetained, liveConnection);
                     }
+                    endSessionDelivery(liveSession);
                     CFRelease(sbRetained);
                 });
             }

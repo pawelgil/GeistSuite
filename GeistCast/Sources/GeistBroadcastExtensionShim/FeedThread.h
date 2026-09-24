@@ -5,4 +5,4 @@
 void GC_StartFeedThread(id broadcastHandler);
 void GC_StopFeedThread(void);
 void GC_SetFeedPaused(BOOL paused);
-void GC_SetMicAudioReadiness(BOOL ready);
+void GC_SetMicDeliveryMode(NSString *mode);

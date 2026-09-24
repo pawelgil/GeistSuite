@@ -40,10 +40,10 @@ static void swiz_movieFile_startRecording(id self, SEL _cmd, NSURL *url, id dele
     }
 }
 
-static void swiz_movieFile_stopRecording(id self, SEL _cmd) {
-    GeistCamMovieRecording *rec = objc_getAssociatedObject(self, kGeistCamRecordingKey);
+static void finishMovieRecording(id output, NSError *interruptionError) {
+    GeistCamMovieRecording *rec = objc_getAssociatedObject(output, kGeistCamRecordingKey);
     if (!rec) {
-        geistcam_warnf("MovieFile stopRecording: no active recording for out=%p", self);
+        geistcam_warnf("MovieFile stopRecording: no active recording for out=%p", output);
         return;
     }
     @synchronized (rec) {
@@ -51,11 +51,11 @@ static void swiz_movieFile_stopRecording(id self, SEL _cmd) {
         rec.active = NO;
     }
     recordingMovieOutputStopped(rec);
-    geistcam_markerf("MovieFile stopRecording: out=%p", self);
-    NSArray *connections = [self performSelector:@selector(connections)];
+    geistcam_markerf("MovieFile stopRecording: out=%p", output);
+    NSArray *connections = [output performSelector:@selector(connections)];
     NSURL *url = rec.outputURL;
     id delegate = rec.delegate;
-    id outputCapture = self;
+    id outputCapture = output;
 
     void (^postFinish)(NSError *) = ^(NSError *e) {
         SEL didFinishSel = @selector(captureOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:);
@@ -68,7 +68,7 @@ static void swiz_movieFile_stopRecording(id self, SEL _cmd) {
 
     if (!rec.writer) {
         geistcam_warnf("MovieFile stopRecording: no writer (no video frames received)");
-        NSError *e = [NSError errorWithDomain:AVFoundationErrorDomain code:AVErrorSessionWasInterrupted userInfo:nil];
+        NSError *e = interruptionError ?: [NSError errorWithDomain:AVFoundationErrorDomain code:AVErrorSessionWasInterrupted userInfo:nil];
         postFinish(e);
         return;
     }
@@ -79,9 +79,24 @@ static void swiz_movieFile_stopRecording(id self, SEL _cmd) {
         NSError *werr = rec.writer.error;
         geistcam_markerf("MovieFile finishWriting: status=%d err=%s",
                           (int)status, werr.localizedDescription.UTF8String ?: "(none)");
-        NSError *cb = (status == AVAssetWriterStatusCompleted) ? nil : werr;
+        NSError *cb = interruptionError ?: ((status == AVAssetWriterStatusCompleted) ? nil : werr);
         postFinish(cb);
     }];
+}
+
+static void swiz_movieFile_stopRecording(id self, SEL _cmd) {
+    finishMovieRecording(self, nil);
+}
+
+void interruptMovieFileOutputsForSession(AVCaptureSession *session) {
+    NSError *error = [NSError errorWithDomain:AVFoundationErrorDomain
+                                         code:AVErrorSessionWasInterrupted
+                                     userInfo:nil];
+    for (AVCaptureOutput *output in session.outputs) {
+        if (![output isKindOfClass:NSClassFromString(@"AVCaptureMovieFileOutput")]) continue;
+        GeistCamMovieRecording *recording = objc_getAssociatedObject(output, kGeistCamRecordingKey);
+        if (recording.active) finishMovieRecording(output, error);
+    }
 }
 
 void installMovieFileSwizzles(void) {

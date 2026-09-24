@@ -358,10 +358,15 @@ import Testing
         try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
         await extensionConnected.wait()
 
-        try await sut.simulateMicAudioInterruption(true)
-
+        async let change: Void = sut.simulateMicAudioInterruption(true)
         let message = try await readWireMessage(from: extFD)
-        #expect(message == .setMicAudioReadiness(ready: false))
+        guard case let .setMicDelivery(mode, requestID) = message else {
+            Issue.record("expected setMicDelivery, got \(message)")
+            return
+        }
+        #expect(mode == "notReady")
+        try sendMessage(.controlAck(requestID: requestID), to: extFD)
+        try await change
 
         await sut.stop()
     }

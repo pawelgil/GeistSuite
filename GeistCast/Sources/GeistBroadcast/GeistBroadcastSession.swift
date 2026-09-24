@@ -50,6 +50,12 @@ public struct ExtensionTerminationError: Error, Equatable, Sendable {
     }
 }
 
+public enum BroadcastMicDeliveryMode: String, Sendable {
+    case normal
+    case notReady
+    case withheld
+}
+
 public actor GeistBroadcastSession {
 
     private struct SocketPathIdentity: Equatable, Sendable {
@@ -95,6 +101,9 @@ public actor GeistBroadcastSession {
         case unknownBroadcast
         case notConnected
         case notBroadcasting
+        case alreadyPaused
+        case notPaused
+        case controlTimedOut
         case extensionDiedBeforeStart
         case shimDylibMissing(String)
     }
@@ -108,6 +117,8 @@ public actor GeistBroadcastSession {
     public private(set) weak var delegate: (any GeistBroadcastSessionDelegate)?
     public private(set) var state: State = .idle
     public private(set) var activeBroadcasts: Set<Broadcast> = []
+    public private(set) var lastBroadcastEndedNormally: Bool?
+    public private(set) var lastExtensionTerminationError: ExtensionTerminationError?
 
     private let simctlSetPath: String?
     private let videoCapture: VideoCaptureConfig
@@ -120,6 +131,7 @@ public actor GeistBroadcastSession {
     private var lastStagedSourceHash: String?
     private let appShimDylibPath: String?
     private let extensionShimDylibPath: String?
+    private let additionalExtensionDylibPaths: [String]
     private let encoder = WireEncoder()
 
     private static let videoQueueCapacity = 1
@@ -157,12 +169,17 @@ public actor GeistBroadcastSession {
     private var launchTask: Task<Void, Never>?
     private var launchGeneration: UUID?
     private var spawnedAppex: SpawnedAppex?
+    private var broadcastEndStates: [pid_t: Bool] = [:]
+    private var extensionTerminationErrors: [pid_t: ExtensionTerminationError] = [:]
+    private var extensionTerminations: [pid_t: ProcessTermination] = [:]
     private var reapTasks: [UUID: Task<Void, Never>] = [:]
     private var disconnectedExtensionPeerPID: pid_t?
     private var micAuthPollTask: Task<Void, Never>?
     private var lastMicAuth: Bool = false
     private var clientFDs: Set<Int32> = []
     private var pausedBroadcasts: Set<Broadcast> = []
+    private var pendingControlRequests: [String: CheckedContinuation<Void, Error>] = [:]
+    public private(set) var micDeliveryMode: BroadcastMicDeliveryMode = .normal
 
     private var videoSource: (any BroadcastSource)?
     private var micSource: (any BroadcastSource)?
@@ -178,6 +195,7 @@ public actor GeistBroadcastSession {
         extensionBundleID: String? = nil,
         videoCapture: VideoCaptureConfig = .simulatorScreen,
         micAudio: MicAudioConfig = .systemMicrophone,
+        additionalExtensionDylibPaths: [String] = [],
         delegate: (any GeistBroadcastSessionDelegate)? = nil
     ) async throws {
         let resolved = try await ExtensionDiscovery.resolve(
@@ -202,7 +220,8 @@ public actor GeistBroadcastSession {
             stager: AppexStager(),
             spawner: AppexSpawner(),
             appShimDylibPath: appShim,
-            extensionShimDylibPath: extShim
+            extensionShimDylibPath: extShim,
+            additionalExtensionDylibPaths: additionalExtensionDylibPaths
         )
     }
 
@@ -226,7 +245,8 @@ public actor GeistBroadcastSession {
         stager: any AppexStaging,
         spawner: any AppexSpawning,
         appShimDylibPath: String? = nil,
-        extensionShimDylibPath: String? = nil
+        extensionShimDylibPath: String? = nil,
+        additionalExtensionDylibPaths: [String] = []
     ) {
         self.simulator = simulatorUDID
         self.hostBundleID = hostBundleID
@@ -250,6 +270,7 @@ public actor GeistBroadcastSession {
         self.lastStagedSourceHash = Self.sourceBinaryHash(appexPath: appexPath)
         self.appShimDylibPath = appShimDylibPath
         self.extensionShimDylibPath = extensionShimDylibPath
+        self.additionalExtensionDylibPaths = additionalExtensionDylibPaths
         let videoQueue = BoundedFrameQueue<Data>(capacity: GeistBroadcastSession.videoQueueCapacity)
         let micQueue = BoundedFrameQueue<Data>(capacity: GeistBroadcastSession.audioQueueCapacity)
         self.videoQueue = videoQueue
@@ -347,6 +368,9 @@ public actor GeistBroadcastSession {
         activeFrameToken?.deactivate()
         hostFD = nil
         extensionFD = nil
+        broadcastEndStates.removeAll()
+        extensionTerminationErrors.removeAll()
+        extensionTerminations.removeAll()
         pausedBroadcasts.removeAll()
         transition(to: .stopped)
     }
@@ -389,10 +413,31 @@ public actor GeistBroadcastSession {
             || userConfirmedStart
     }
 
+    public var extensionProcessID: pid_t? {
+        spawnedAppex?.pid ?? extensionFD.flatMap { controlPeerPIDs[$0] }
+    }
+
+    public var extensionTerminationStatus: Int32? { spawnedAppex?.termination.value }
+
+    public func extensionTerminationStatus(for processID: pid_t) -> Int32? {
+        extensionTerminations[processID]?.value
+    }
+
+    public func extensionTerminationError(for processID: pid_t) -> ExtensionTerminationError? {
+        extensionTerminationErrors[processID]
+    }
+
+    public func broadcastEndedNormally(for processID: pid_t) -> Bool? {
+        broadcastEndStates[processID]
+    }
+
     /// Always forwards `.broadcastEnded` to the host shim, even when no
     /// `.broadcastStarted` ever arrived — the host's `gFakeCaptured` was
     /// already flipped on at user confirm and stays stuck otherwise.
     public func stopBroadcast() {
+        if !activeBroadcasts.isEmpty || pendingBroadcast != nil {
+            recordBroadcastEnd(normal: false)
+        }
         if let extFD = extensionFD {
             send(.finish, to: extFD)
             extensionFD = nil
@@ -415,28 +460,43 @@ public actor GeistBroadcastSession {
         detachVideoSource()
     }
 
-    public func pause() throws {
-        guard let broadcast = activeBroadcasts.first else {
-            throw SessionError.notBroadcasting
-        }
-        guard let extFD = extensionFD else {
-            throw SessionError.notConnected
-        }
-        guard !pausedBroadcasts.contains(broadcast) else { return }
-        pausedBroadcasts.insert(broadcast)
-        send(.pause, to: extFD)
+    public var isPaused: Bool {
+        guard let broadcast = activeBroadcasts.first else { return false }
+        return pausedBroadcasts.contains(broadcast)
     }
 
-    public func resume() throws {
+    public func pause() async throws {
         guard let broadcast = activeBroadcasts.first else {
             throw SessionError.notBroadcasting
         }
         guard let extFD = extensionFD else {
             throw SessionError.notConnected
         }
-        guard pausedBroadcasts.contains(broadcast) else { return }
+        guard !pausedBroadcasts.contains(broadcast) else { throw SessionError.alreadyPaused }
+        pausedBroadcasts.insert(broadcast)
+        do {
+            try await sendControl({ .pause(requestID: $0) }, to: extFD)
+        } catch {
+            pausedBroadcasts.remove(broadcast)
+            throw error
+        }
+    }
+
+    public func resume() async throws {
+        guard let broadcast = activeBroadcasts.first else {
+            throw SessionError.notBroadcasting
+        }
+        guard let extFD = extensionFD else {
+            throw SessionError.notConnected
+        }
+        guard pausedBroadcasts.contains(broadcast) else { throw SessionError.notPaused }
         pausedBroadcasts.remove(broadcast)
-        send(.resume, to: extFD)
+        do {
+            try await sendControl({ .resume(requestID: $0) }, to: extFD)
+        } catch {
+            pausedBroadcasts.insert(broadcast)
+            throw error
+        }
     }
 
     /// Takes effect on the next broadcast; an in-flight broadcast keeps its
@@ -487,11 +547,35 @@ public actor GeistBroadcastSession {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    public func simulateMicAudioInterruption(_ active: Bool) throws {
+    public func simulateMicAudioInterruption(_ active: Bool) async throws {
+        try await setMicDelivery(active ? .notReady : .normal)
+    }
+
+    public func setMicDelivery(_ mode: BroadcastMicDeliveryMode) async throws {
         guard let extFD = extensionFD else {
             throw SessionError.notConnected
         }
-        send(.setMicAudioReadiness(ready: !active), to: extFD)
+        try await sendControl({ .setMicDelivery(mode: mode.rawValue, requestID: $0) }, to: extFD)
+        micDeliveryMode = mode
+    }
+
+    private func sendControl(
+        _ message: (String) -> WireMessage,
+        to fd: Int32
+    ) async throws {
+        let requestID = UUID().uuidString
+        try await withCheckedThrowingContinuation { continuation in
+            pendingControlRequests[requestID] = continuation
+            send(message(requestID), to: fd)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                await self?.timeOutControlRequest(requestID)
+            }
+        }
+    }
+
+    private func timeOutControlRequest(_ requestID: String) {
+        pendingControlRequests.removeValue(forKey: requestID)?.resume(throwing: SessionError.controlTimedOut)
     }
 
     private func transition(to newState: State) {
@@ -776,10 +860,16 @@ public actor GeistBroadcastSession {
         if extensionFD == fd {
             log.notice("[Session \(self.hostBundleID)] extension fd closed (fd=\(fd)) activeBroadcasts=\(self.activeBroadcasts.count) pending=\(self.pendingBroadcast != nil)")
             extensionFD = nil
+            let requests = pendingControlRequests.values
+            pendingControlRequests.removeAll()
+            for request in requests {
+                request.resume(throwing: SessionError.notConnected)
+            }
             // Extension going away with an active broadcast is the only
             // signal we have that the broadcast actually ended (extension
             // process died for any reason). Fire the delegate and clean up.
             for broadcast in activeBroadcasts {
+                recordBroadcastEnd(normal: false, processID: process?.pid ?? peerPID)
                 activeBroadcasts.remove(broadcast)
                 pausedBroadcasts.remove(broadcast)
                 delegate?.session(self, broadcastEnded: broadcast)
@@ -809,7 +899,7 @@ public actor GeistBroadcastSession {
         cancelReaps()
         let spawner = self.spawner
         reapTasks[process.generation] = Task { [weak self] in
-            await Task.yield()
+            try? await Task.sleep(for: .seconds(1))
             if !Task.isCancelled { await spawner.terminate(process) }
             await self?.reapFinished(generation: process.generation)
         }
@@ -921,6 +1011,7 @@ public actor GeistBroadcastSession {
             let wasActive = activeBroadcasts.remove(broadcast) != nil
             pausedBroadcasts.remove(broadcast)
             if wasActive {
+                recordBroadcastEnd(normal: true)
                 delegate?.session(self, broadcastEnded: broadcast)
                 if let hostFD, fd != hostFD {
                     send(.broadcastEnded(broadcast), to: hostFD)
@@ -933,25 +1024,47 @@ public actor GeistBroadcastSession {
             let error = ExtensionTerminationError(
                 domain: domain, code: code, message: message
             )
+            lastExtensionTerminationError = error
+            let processID = controlPeerPIDs[fd] ?? controlProcesses[fd]?.pid
+            if let processID {
+                extensionTerminationErrors[processID] = error
+            }
+            recordBroadcastEnd(normal: false, processID: processID)
             if let broadcast = activeBroadcasts.first {
                 activeBroadcasts.remove(broadcast)
                 pausedBroadcasts.remove(broadcast)
                 delegate?.session(self, broadcast: broadcast, terminatedWithError: error)
+                if let hostFD { send(.broadcastEnded(broadcast), to: hostFD) }
             } else if let pending = pendingBroadcast {
                 delegate?.session(self, broadcastFailedToStart: pending, error: error)
+                if let hostFD { send(.broadcastEnded(pending), to: hostFD) }
                 pendingBroadcast = nil
             }
+            userConfirmedStart = false
             detachMicSource()
             detachVideoSource()
 
-        case .state, .begin, .finish, .pause, .resume, .setMicAudioReadiness:
+        case .controlAck(let requestID):
+            pendingControlRequests.removeValue(forKey: requestID)?.resume()
+
+        case .state, .begin, .finish, .pause, .resume, .setMicAudioReadiness, .setMicDelivery:
             break
+        }
+    }
+
+    private func recordBroadcastEnd(normal: Bool, processID: pid_t? = nil) {
+        lastBroadcastEndedNormally = normal
+        if let processID = processID ?? extensionProcessID {
+            broadcastEndStates[processID] = normal
         }
     }
 
     private func armBroadcast() {
         guard pendingBroadcast == nil else { return }
         cancelReaps()
+        micDeliveryMode = .normal
+        lastBroadcastEndedNormally = nil
+        lastExtensionTerminationError = nil
         spawnedAppex = nil
         let broadcast = Broadcast(
             simulatorUDID: simulator,
@@ -1011,6 +1124,7 @@ public actor GeistBroadcastSession {
                 return
             }
             spawnedAppex = process
+            extensionTerminations[process.pid] = process.termination
             for fd in controlWriters.keys {
                 associateControlProcessIfKnown(fd: fd)
             }
@@ -1042,12 +1156,14 @@ public actor GeistBroadcastSession {
             "GEISTCAST_SOCKET": socketPath,
             "GEISTCAST_HOST_SOCKET": frameSocketPath,
         ]
-        if let path = extensionShimDylibPath {
+        let dylibPaths = additionalExtensionDylibPaths + [extensionShimDylibPath].compactMap { $0 }
+        for path in dylibPaths {
             guard FileManager.default.fileExists(atPath: path) else {
                 throw SessionError.shimDylibMissing(path)
             }
-            env["DYLD_INSERT_LIBRARIES"] = path
         }
+        if !dylibPaths.isEmpty { env["DYLD_INSERT_LIBRARIES"] = dylibPaths.joined(separator: ":") }
+        env["OS_ACTIVITY_DT_MODE"] = "YES"
         // Staging copies the appex to /tmp without its host's Frameworks/
         // and PackageFrameworks/ siblings, breaking @rpath resolution for
         // SPM-bundled dylibs.

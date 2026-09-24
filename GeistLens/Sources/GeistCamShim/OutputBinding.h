@@ -2,18 +2,19 @@
 #import <AVFoundation/AVFoundation.h>
 #import "Source.h"
 
-typedef struct OutputBinding {
-    id output;                  // weak — session retains
-    GeistCamSource *source;
-    AVCaptureSession *session;  // weak — caller retains
-} OutputBinding;
+@interface GCOutputBinding : NSObject
+@property(nonatomic, weak) id output;
+@property(nonatomic, assign) GeistCamSource *source;
+@property(nonatomic, weak) AVCaptureSession *session;
+@property(nonatomic, copy) NSString *sessionID;
+@end
 
 #define GEISTCAM_MAX_OUTPUTS 16
 
 void rebuildOutputBindingsForSession(AVCaptureSession *session);
+void removeOutputBindingsForSessionID(NSString *sessionID);
 
-// Caller-owned snapshot — buffer must hold GEISTCAM_MAX_OUTPUTS. Returns count.
-int snapshotOutputBindings(OutputBinding *outBuf);
+NSArray<GCOutputBinding *> *snapshotOutputBindings(void);
 
 BOOL isSourceActive(GeistCamSource *src);
 
