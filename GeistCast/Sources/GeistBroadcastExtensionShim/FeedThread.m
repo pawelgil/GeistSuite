@@ -1,5 +1,6 @@
 #import "FeedThread.h"
 #import "FrameSocket.h"
+#import "GeistBroadcastShimCore.h"
 #import "ShimLog.h"
 
 #import <Foundation/Foundation.h>
@@ -16,6 +17,7 @@ static NSInteger gMicDeliveryMode = 0;
 static pthread_mutex_t gDeliveryLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t gFeedThread;
 static int64_t gFrameCount = 0;
+static NSTimeInterval gLastProgressLogTime = 0;
 
 static void *FeedThreadMain(void *arg) {
     (void)arg;
@@ -62,7 +64,8 @@ static void *FeedThreadMain(void *arg) {
                 Fn fn = (Fn)imp;
                 fn(handler, sel, delivered.sampleBuffer, (NSInteger)delivered.type);
                 gFrameCount++;
-                if ((gFrameCount % 30) == 0) {
+                NSTimeInterval now = NSDate.timeIntervalSinceReferenceDate;
+                if (geistbroadcast_should_log_progress(now, 30, &gLastProgressLogTime)) {
                     GC_LOG("fed %lld samples (last type=%ld)",
                            gFrameCount, (long)delivered.type);
                 }
@@ -78,6 +81,7 @@ static void *FeedThreadMain(void *arg) {
 void GC_StartFeedThread(id broadcastHandler) {
     gBroadcastHandler = broadcastHandler;
     gFrameCount = 0;
+    gLastProgressLogTime = NSDate.timeIntervalSinceReferenceDate;
     pthread_mutex_lock(&gDeliveryLock);
     gFeedPaused = NO;
     gMicDeliveryMode = 0;

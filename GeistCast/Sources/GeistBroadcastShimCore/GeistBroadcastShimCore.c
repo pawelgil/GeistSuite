@@ -23,3 +23,15 @@ int32_t geistbroadcast_encode_event_line(
     }
     return (int32_t)n;
 }
+
+bool geistbroadcast_should_log_progress(
+    double now,
+    double interval,
+    double *last_log_time)
+{
+    if (now - *last_log_time < interval) {
+        return false;
+    }
+    *last_log_time = now;
+    return true;
+}

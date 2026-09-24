@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,6 +21,11 @@ int32_t geistbroadcast_encode_event_line(
     const char *started_at_iso8601,
     char *buffer,
     size_t buffer_len);
+
+bool geistbroadcast_should_log_progress(
+    double now,
+    double interval,
+    double *last_log_time);
 
 #ifdef __cplusplus
 }

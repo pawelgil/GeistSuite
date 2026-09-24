@@ -32,4 +32,17 @@ import GeistBroadcastShimCore
         #expect(length > 0)
         #expect(String(cString: buffer) == #"{"type":"started","simulatorUDID":"SIM-UDID","hostAppBundleID":"com.host","extensionBundleID":"com.host.cast","startedAt":"2026-01-01T00:00:00Z"}"#)
     }
+
+    @Test
+    func progressLogAdmission_rateLimitsAndUpdatesLastLogTime() {
+        var lastLogTime = 100.0
+
+        #expect(!geistbroadcast_should_log_progress(129.999, 30, &lastLogTime))
+        #expect(lastLogTime == 100)
+        #expect(geistbroadcast_should_log_progress(130, 30, &lastLogTime))
+        #expect(lastLogTime == 130)
+        #expect(!geistbroadcast_should_log_progress(159.999, 30, &lastLogTime))
+        #expect(geistbroadcast_should_log_progress(160, 30, &lastLogTime))
+        #expect(lastLogTime == 160)
+    }
 }
