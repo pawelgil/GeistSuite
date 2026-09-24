@@ -5,6 +5,7 @@
 #import "RecordingState.h"
 #import "Source.h"
 #import "Util.h"
+#import "GeistWeakReference.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <objc/message.h>
@@ -115,7 +116,10 @@ static IMP s_origAudioDataSetDelegate;
 static void recordSampleDelegate(id output, id delegate, dispatch_queue_t queue) {
     geistcam_debugf("DataOutput setSampleBufferDelegate: out=%s delegate=%p queue=%p",
                       [NSStringFromClass([output class]) UTF8String], delegate, queue);
-    objc_setAssociatedObject(output, kGeistCamSampleDelegateKey, delegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    GeistWeakReference *delegateReference = delegate
+        ? [[GeistWeakReference alloc] initWithObject:delegate]
+        : nil;
+    objc_setAssociatedObject(output, kGeistCamSampleDelegateKey, delegateReference, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(output, kGeistCamSampleQueueKey, queue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 

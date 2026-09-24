@@ -6,6 +6,7 @@
 #import "Source.h"
 #import "Transform.h"
 #import "Util.h"
+#import "GeistWeakReference.h"
 #import <AVFoundation/AVFoundation.h>
 #import <objc/message.h>
 
@@ -56,13 +57,14 @@ void deliverToBoundOutputs(GeistCamSource *src, CMSampleBufferRef sb, CMTime ori
             }
         } else if ([output isKindOfClass:NSClassFromString(@"AVCaptureVideoDataOutput")] ||
                    [output isKindOfClass:NSClassFromString(@"AVCaptureAudioDataOutput")]) {
-            id delegate = objc_getAssociatedObject(output, kGeistCamSampleDelegateKey);
+            GeistWeakReference *delegateReference = objc_getAssociatedObject(output, kGeistCamSampleDelegateKey);
+            id delegate = delegateReference.object;
             dispatch_queue_t queue = objc_getAssociatedObject(output, kGeistCamSampleQueueKey);
             if (delegate && queue) {
                 AVCaptureConnection *conn = videoConn ?: [[output connections] firstObject];
                 CFRetain(toDeliver);
                 CMSampleBufferRef sbRetained = toDeliver;
-                id delegateRetained = delegate;
+                __weak id weakDelegate = delegate;
                 __weak AVCaptureSession *weakSession = session;
                 __weak id weakOutput = output;
                 __weak AVCaptureConnection *weakConnection = conn;
@@ -70,15 +72,16 @@ void deliverToBoundOutputs(GeistCamSource *src, CMSampleBufferRef sb, CMTime ori
                     AVCaptureSession *liveSession = weakSession;
                     id liveOutput = weakOutput;
                     AVCaptureConnection *liveConnection = weakConnection;
+                    id liveDelegate = weakDelegate;
                     if (!liveSession || !liveOutput || !liveConnection ||
                         !beginSessionDelivery(liveSession, generation)) {
                         CFRelease(sbRetained);
                         return;
                     }
                     SEL sel = @selector(captureOutput:didOutputSampleBuffer:fromConnection:);
-                    if ([delegateRetained respondsToSelector:sel]) {
+                    if ([liveDelegate respondsToSelector:sel]) {
                         void (*fn)(id, SEL, id, CMSampleBufferRef, AVCaptureConnection *) = (void *)objc_msgSend;
-                        fn(delegateRetained, sel, liveOutput, sbRetained, liveConnection);
+                        fn(liveDelegate, sel, liveOutput, sbRetained, liveConnection);
                     }
                     endSessionDelivery(liveSession);
                     CFRelease(sbRetained);

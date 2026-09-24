@@ -5,6 +5,7 @@
 #import "Source.h"
 #import "Util.h"
 #import "Wire.h"
+#import "GeistWeakReference.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -19,7 +20,10 @@ static const void *kMetaTypesKey    = &kMetaTypesKey;
 // implementations route into Fig's metadata machinery, which we bypass; calls
 // to the underlying Fig session crash since we never let Fig set up.
 static void swiz_setMetadataObjectsDelegate(id self, SEL _cmd, id delegate, dispatch_queue_t queue) {
-    objc_setAssociatedObject(self, kMetaDelegateKey, delegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    GeistWeakReference *delegateReference = delegate
+        ? [[GeistWeakReference alloc] initWithObject:delegate]
+        : nil;
+    objc_setAssociatedObject(self, kMetaDelegateKey, delegateReference, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(self, kMetaQueueKey, queue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     metadataInvalidateDemand();
 }
@@ -47,7 +51,8 @@ static SlotDemand computeDemandForSlot(GeistCamSlot slot) {
         if (!session || !isSessionDelivering(session)) continue;
         id output = binding.output;
         if (!output || ![output isKindOfClass:metaCls]) continue;
-        id delegate = objc_getAssociatedObject(output, kMetaDelegateKey);
+        GeistWeakReference *delegateReference = objc_getAssociatedObject(output, kMetaDelegateKey);
+        id delegate = delegateReference.object;
         if (!delegate) continue;
         NSArray *types = objc_getAssociatedObject(output, kMetaTypesKey);
         for (AVMetadataObjectType t in types) {
@@ -244,7 +249,8 @@ static void deliverMetadataObjects(NSArray *avObjects, GeistCamSource *src) {
         id output = binding.output;
         if (binding.source != src || !session || !output) continue;
         if (!isSessionDelivering(session) || ![output isKindOfClass:metaCls]) continue;
-        id delegate = objc_getAssociatedObject(output, kMetaDelegateKey);
+        GeistWeakReference *delegateReference = objc_getAssociatedObject(output, kMetaDelegateKey);
+        id delegate = delegateReference.object;
         dispatch_queue_t queue = objc_getAssociatedObject(output, kMetaQueueKey);
         NSArray<AVMetadataObjectType> *types = objc_getAssociatedObject(output, kMetaTypesKey);
         if (!delegate || !queue || !types) continue;
@@ -257,7 +263,7 @@ static void deliverMetadataObjects(NSArray *avObjects, GeistCamSource *src) {
         }
 
         AVCaptureConnection *conn = [[output performSelector:@selector(connections)] firstObject];
-        id delegateRetained = delegate;
+        __weak id weakDelegate = delegate;
         __weak AVCaptureSession *weakSession = session;
         __weak id weakOutput = output;
         __weak AVCaptureConnection *weakConnection = conn;
@@ -267,12 +273,13 @@ static void deliverMetadataObjects(NSArray *avObjects, GeistCamSource *src) {
             AVCaptureSession *liveSession = weakSession;
             id liveOutput = weakOutput;
             AVCaptureConnection *liveConnection = weakConnection;
+            id liveDelegate = weakDelegate;
             if (!liveSession || !liveOutput || !liveConnection ||
                 !beginSessionDelivery(liveSession, generation)) return;
             SEL sel = @selector(captureOutput:didOutputMetadataObjects:fromConnection:);
-            if ([delegateRetained respondsToSelector:sel]) {
+            if ([liveDelegate respondsToSelector:sel]) {
                 void (*fn)(id, SEL, id, NSArray *, AVCaptureConnection *) = (void *)objc_msgSend;
-                fn(delegateRetained, sel, liveOutput, toShip, liveConnection);
+                fn(liveDelegate, sel, liveOutput, toShip, liveConnection);
             }
             endSessionDelivery(liveSession);
         });
