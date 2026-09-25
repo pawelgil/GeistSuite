@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import Foundation
+import Synchronization
 import Testing
 @testable import GeistCamera
 
@@ -57,8 +58,8 @@ struct VideoFileMediaSourceTests {
         let sink = RecordingMediaSinkSpy()
 
         try source.start(into: sink)
-        try await Task.sleep(for: .milliseconds(400))
-        source.stop()
+        defer { source.stop() }
+        try await sink.waitForSamples()
 
         let videoCount = sink.videoCount
         let audioCount = sink.audioCount
@@ -73,8 +74,8 @@ struct VideoFileMediaSourceTests {
 
         let preStart = DispatchTime.now().uptimeNanoseconds
         try source.start(into: sink)
-        try await Task.sleep(for: .milliseconds(400))
-        source.stop()
+        defer { source.stop() }
+        try await sink.waitForSamples()
 
         let firstVideoPts = sink.firstVideoPtsNs
         let firstAudioPts = sink.firstAudioPtsNs
@@ -86,7 +87,8 @@ struct VideoFileMediaSourceTests {
         // the later track lands within the asset's per-track offset.
         let earliest = min(firstVideo, firstAudio)
         #expect(earliest >= Int64(bitPattern: preStart))
-        #expect(earliest < Int64(bitPattern: preStart) + 1_000_000_000) // within 1s of start
+        let firstReceipt = try #require(sink.firstReceivedAtNs)
+        #expect(earliest <= firstReceipt)
         #expect(abs(firstVideo - firstAudio) < 100_000_000)  // < 100ms
     }
 
@@ -96,8 +98,8 @@ struct VideoFileMediaSourceTests {
         let sink = RecordingMediaSinkSpy()
 
         try source.start(into: sink)
-        try await Task.sleep(for: .milliseconds(600))
-        source.stop()
+        defer { source.stop() }
+        try await sink.waitForSamples(minimumPerTrack: 10)
 
         #expect(sink.videoPtsAreMonotonic)
         #expect(sink.audioPtsAreMonotonic)
@@ -111,50 +113,90 @@ private enum FixtureError: Error {
 
 // MARK: - Test Doubles
 
-private final class RecordingMediaSinkSpy: MediaSink, @unchecked Sendable {
-    private let lock = NSLock()
-    private var videoPtsNs: [Int64] = []
-    private var audioPtsNs: [Int64] = []
+private final class RecordingMediaSinkSpy: MediaSink {
+    private struct Recording {
+        var videoPtsNs: [Int64] = []
+        var audioPtsNs: [Int64] = []
+        var firstReceivedAtNs: Int64?
+    }
+
+    private enum ObservationError: Error {
+        case missingSamples(video: Int, audio: Int)
+    }
+
+    private let recording = Mutex(Recording())
+    private let received: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (received, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+    }
+
+    deinit {
+        continuation.finish()
+    }
 
     var videoCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return videoPtsNs.count
+        recording.withLock { $0.videoPtsNs.count }
     }
 
     var audioCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return audioPtsNs.count
+        recording.withLock { $0.audioPtsNs.count }
     }
 
     var firstVideoPtsNs: Int64? {
-        lock.lock(); defer { lock.unlock() }
-        return videoPtsNs.first
+        recording.withLock { $0.videoPtsNs.first }
     }
 
     var firstAudioPtsNs: Int64? {
-        lock.lock(); defer { lock.unlock() }
-        return audioPtsNs.first
+        recording.withLock { $0.audioPtsNs.first }
+    }
+
+    var firstReceivedAtNs: Int64? {
+        recording.withLock { $0.firstReceivedAtNs }
     }
 
     var videoPtsAreMonotonic: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return zip(videoPtsNs, videoPtsNs.dropFirst()).allSatisfy { $0 <= $1 }
+        recording.withLock { zip($0.videoPtsNs, $0.videoPtsNs.dropFirst()).allSatisfy { $0 <= $1 } }
     }
 
     var audioPtsAreMonotonic: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return zip(audioPtsNs, audioPtsNs.dropFirst()).allSatisfy { $0 <= $1 }
+        recording.withLock { zip($0.audioPtsNs, $0.audioPtsNs.dropFirst()).allSatisfy { $0 <= $1 } }
     }
 
     func sendVideo(_ pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) {
         let ns = CMTimeConvertScale(pts, timescale: 1_000_000_000, method: .default).value
-        lock.lock(); defer { lock.unlock() }
-        videoPtsNs.append(ns)
+        recording.withLock {
+            $0.videoPtsNs.append(ns)
+            $0.firstReceivedAtNs = $0.firstReceivedAtNs ?? Int64(bitPattern: DispatchTime.now().uptimeNanoseconds)
+        }
+        continuation.yield()
     }
 
     func sendAudio(_ samples: AVAudioPCMBuffer, pts: CMTime) {
         let ns = CMTimeConvertScale(pts, timescale: 1_000_000_000, method: .default).value
-        lock.lock(); defer { lock.unlock() }
-        audioPtsNs.append(ns)
+        recording.withLock {
+            $0.audioPtsNs.append(ns)
+            $0.firstReceivedAtNs = $0.firstReceivedAtNs ?? Int64(bitPattern: DispatchTime.now().uptimeNanoseconds)
+        }
+        continuation.yield()
+    }
+
+    func waitForSamples(minimumPerTrack: Int = 1) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { [received] in
+                for await _ in received {
+                    if self.videoCount >= minimumPerTrack && self.audioCount >= minimumPerTrack { return }
+                }
+                try Task.checkCancellation()
+                throw ObservationError.missingSamples(video: self.videoCount, audio: self.audioCount)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(10))
+                throw ObservationError.missingSamples(video: self.videoCount, audio: self.audioCount)
+            }
+            defer { group.cancelAll() }
+            try await group.next()
+        }
     }
 }
