@@ -3,6 +3,31 @@ import GeistCameraShimCore
 import Testing
 
 struct GeistCameraSessionStateTests {
+    @Test func interruption_CompetingPreviews_OnlyOneMutationBegins() {
+        let sut = createSUT()
+        let firstPreview = sut.previewInterruptionTransition(for: .contention, reason: 3)
+        let secondPreview = sut.previewInterruptionTransition(for: .contention, reason: 3)
+
+        let first = sut.setReason(3, for: .contention)
+        let second = sut.setReason(3, for: .contention)
+
+        #expect(firstPreview == .began)
+        #expect(secondPreview == .began)
+        #expect(first == .began)
+        #expect(second == .unchanged)
+        #expect(sut.deliveryGeneration == 1)
+    }
+
+    @Test func interruption_LastCauseRemoved_ReturnsCommittedEnd() {
+        let sut = createSUT()
+        sut.setReason(1, for: .lifecycle)
+
+        let transition = sut.setReason(nil, for: .lifecycle)
+
+        #expect(transition == .ended)
+        #expect(sut.interruptionReason == nil)
+    }
+
     @Test func interruption_StoppedBeforeForeground_ClearsLifecycleCause() {
         let sut = createSUT()
         sut.running = true
@@ -90,7 +115,7 @@ struct GeistCameraSessionStateTests {
         sut.setReason(1, for: .lifecycle)
         sut.setReason(2, for: .manual)
 
-        let transition = sut.interruptionTransition(for: .manual, reason: nil)
+        let transition = sut.previewInterruptionTransition(for: .manual, reason: nil)
 
         #expect(transition == .unchanged)
     }
@@ -99,7 +124,7 @@ struct GeistCameraSessionStateTests {
         let sut = createSUT()
         sut.setReason(1, for: .lifecycle)
 
-        let transition = sut.interruptionTransition(for: .lifecycle, reason: nil)
+        let transition = sut.previewInterruptionTransition(for: .lifecycle, reason: nil)
 
         #expect(transition == .ended)
     }
@@ -107,7 +132,7 @@ struct GeistCameraSessionStateTests {
     @Test func interruptionChange_FirstCauseAdded_Begins() {
         let sut = createSUT()
 
-        let transition = sut.interruptionTransition(for: .manual, reason: 2)
+        let transition = sut.previewInterruptionTransition(for: .manual, reason: 2)
 
         #expect(transition == .began)
         #expect(sut.interruptionReason == nil)
@@ -117,7 +142,7 @@ struct GeistCameraSessionStateTests {
         let sut = createSUT()
         sut.setReason(2, for: .manual)
 
-        let transition = sut.interruptionTransition(for: .manual, reason: 4)
+        let transition = sut.previewInterruptionTransition(for: .manual, reason: 4)
 
         #expect(transition == .unchanged)
         #expect(sut.interruptionReason == 2)

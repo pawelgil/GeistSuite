@@ -26,11 +26,11 @@ typedef NS_ENUM(NSInteger, GeistCameraInterruptionTransition) {
 @property(nonatomic, strong, nullable) NSNumber *startOrder;
 
 - (nullable NSNumber *)reasonForCause:(GeistCameraInterruptionCause)cause;
-- (void)setReason:(nullable NSNumber *)reason forCause:(GeistCameraInterruptionCause)cause
+- (GeistCameraInterruptionTransition)setReason:(nullable NSNumber *)reason forCause:(GeistCameraInterruptionCause)cause
     NS_SWIFT_NAME(setReason(_:for:));
-- (GeistCameraInterruptionTransition)interruptionTransitionForCause:(GeistCameraInterruptionCause)cause
+- (GeistCameraInterruptionTransition)previewInterruptionTransitionForCause:(GeistCameraInterruptionCause)cause
                                                            reason:(nullable NSNumber *)reason
-    NS_SWIFT_NAME(interruptionTransition(for:reason:));
+    NS_SWIFT_NAME(previewInterruptionTransition(for:reason:));
 - (void)beginConfigurationWithCamera:(BOOL)hasCamera NS_SWIFT_NAME(beginConfiguration(hasCamera:));
 - (void)commitConfigurationWithCamera:(BOOL)hasCamera NS_SWIFT_NAME(commitConfiguration(hasCamera:));
 - (void)cameraInputsChangedFrom:(BOOL)hadCamera to:(BOOL)hasCamera

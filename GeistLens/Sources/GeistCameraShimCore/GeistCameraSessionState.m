@@ -27,13 +27,14 @@
     return _reasons[@(cause)];
 }
 
-- (void)setReason:(NSNumber *)reason forCause:(GeistCameraInterruptionCause)cause {
-    GeistCameraInterruptionTransition transition = [self interruptionTransitionForCause:cause reason:reason];
+- (GeistCameraInterruptionTransition)setReason:(NSNumber *)reason forCause:(GeistCameraInterruptionCause)cause {
+    GeistCameraInterruptionTransition transition = [self previewInterruptionTransitionForCause:cause reason:reason];
     _reasons[@(cause)] = reason;
     if (transition == GeistCameraInterruptionTransitionBegan) _deliveryGeneration++;
+    return transition;
 }
 
-- (GeistCameraInterruptionTransition)interruptionTransitionForCause:(GeistCameraInterruptionCause)cause
+- (GeistCameraInterruptionTransition)previewInterruptionTransitionForCause:(GeistCameraInterruptionCause)cause
                                                            reason:(NSNumber *)reason {
     BOOL interrupted = reason != nil;
     for (NSNumber *otherCause in _reasons) {

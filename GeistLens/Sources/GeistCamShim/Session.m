@@ -130,45 +130,68 @@ static void notifyInterruptionEnded(AVCaptureSession *session) {
                                                         object:session];
 }
 
-static void deliverInterruptionTransitions(NSArray<AVCaptureSession *> *interrupted,
-                                           NSInteger reason,
-                                           NSArray<AVCaptureSession *> *ended,
-                                           BOOL synchronously) {
-    void (^deliver)(void) = ^{
-        for (AVCaptureSession *session in interrupted) waitForSessionDeliveries(session);
-        void (^notify)(void) = ^{
-            for (AVCaptureSession *session in interrupted) notifyInterrupted(session, reason);
-            for (AVCaptureSession *session in ended) notifyInterruptionEnded(session);
-        };
-        if ([NSThread isMainThread]) notify();
-        else if (synchronously) dispatch_sync(dispatch_get_main_queue(), notify);
-        else dispatch_async(dispatch_get_main_queue(), notify);
-    };
-    if (synchronously && ![NSThread isMainThread]) dispatch_sync(s_interruptionDeliveryQueue, deliver);
-    else dispatch_async(s_interruptionDeliveryQueue, deliver);
+// Call while holding s_allSessions so delivery order matches commit order.
+static void enqueueCommittedInterruptionTransition(
+    AVCaptureSession *session, GeistCameraInterruptionTransition transition, NSNumber *reason
+) {
+    if (transition == GeistCameraInterruptionTransitionUnchanged) return;
+    dispatch_async(s_interruptionDeliveryQueue, ^{
+        if (transition == GeistCameraInterruptionTransitionBegan) waitForSessionDeliveries(session);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (transition == GeistCameraInterruptionTransitionBegan) notifyInterrupted(session, reason.integerValue);
+            else notifyInterruptionEnded(session);
+        });
+    });
+}
+
+static void waitForInterruptionNotifications(void) {
+    if ([NSThread isMainThread]) return;
+    dispatch_sync(s_interruptionDeliveryQueue, ^{
+        dispatch_sync(dispatch_get_main_queue(), ^{});
+    });
+}
+
+static GeistCameraInterruptionTransition updateInterruptionReason(
+    AVCaptureSession *session, GeistCameraInterruptionCause cause, NSNumber *(^currentReason)(void)
+) {
+    for (;;) {
+        GeistCameraInterruptionTransition preview;
+        @synchronized (s_allSessions) {
+            preview = [sessionState(session) previewInterruptionTransitionForCause:cause reason:currentReason()];
+        }
+        BOOL changes = preview != GeistCameraInterruptionTransitionUnchanged;
+        if (changes) [session willChangeValueForKey:@"interrupted"];
+        BOOL committed = NO;
+        GeistCameraInterruptionTransition transition = GeistCameraInterruptionTransitionUnchanged;
+        @synchronized (s_allSessions) {
+            NSNumber *reason = currentReason();
+            GeistCameraSessionState *state = sessionState(session);
+            if ([state previewInterruptionTransitionForCause:cause reason:reason] == preview) {
+                transition = [state setReason:reason forCause:cause];
+                enqueueCommittedInterruptionTransition(session, transition, reason);
+                committed = YES;
+            }
+        }
+        if (changes) [session didChangeValueForKey:@"interrupted"];
+        if (committed) return transition;
+    }
 }
 
 static GeistCameraInterruptionTransition setInterruptionReason(
     AVCaptureSession *session, GeistCameraInterruptionCause cause, NSNumber *reason
 ) {
-    GeistCameraInterruptionTransition transition;
-    @synchronized (s_allSessions) {
-        transition = [sessionState(session) interruptionTransitionForCause:cause reason:reason];
-    }
-    BOOL changes = transition != GeistCameraInterruptionTransitionUnchanged;
-    if (changes) [session willChangeValueForKey:@"interrupted"];
-    @synchronized (s_allSessions) {
-        [sessionState(session) setReason:reason forCause:cause];
-    }
-    if (changes) [session didChangeValueForKey:@"interrupted"];
-    return transition;
+    return updateInterruptionReason(session, cause, ^NSNumber *{ return reason; });
+}
+
+static NSNumber *cameraContentionReason(AVCaptureSession *session) {
+    BOOL shouldInterrupt = isSessionRunning(session)
+        && sessionHasCamera(session)
+        && ![sessionID(session) isEqualToString:s_cameraStack.lastObject];
+    return shouldInterrupt ? @(AVCaptureSessionInterruptionReasonVideoDeviceInUseByAnotherClient) : nil;
 }
 
 static void reconcileCameraOwnership(void) {
-    NSMutableArray<AVCaptureSession *> *interrupted = [NSMutableArray array];
-    NSMutableArray<AVCaptureSession *> *ended = [NSMutableArray array];
     NSArray<AVCaptureSession *> *sessions;
-    NSString *holder;
     @synchronized (s_allSessions) {
         NSMutableArray<NSString *> *valid = [NSMutableArray array];
         for (NSString *identifier in s_cameraStack) {
@@ -176,26 +199,13 @@ static void reconcileCameraOwnership(void) {
             if (session && isSessionRunning(session) && sessionHasCamera(session)) [valid addObject:identifier];
         }
         s_cameraStack = valid;
-        holder = s_cameraStack.lastObject;
         sessions = s_allSessions.allObjects;
     }
     for (AVCaptureSession *session in sessions) {
-        BOOL shouldInterrupt = isSessionRunning(session)
-            && sessionHasCamera(session)
-            && ![sessionID(session) isEqualToString:holder];
-        NSNumber *reason = shouldInterrupt
-            ? @(AVCaptureSessionInterruptionReasonVideoDeviceInUseByAnotherClient) : nil;
-        GeistCameraInterruptionTransition transition = setInterruptionReason(
-            session, GeistCameraInterruptionCauseContention, reason);
-        if (transition == GeistCameraInterruptionTransitionBegan) [interrupted addObject:session];
-        if (transition == GeistCameraInterruptionTransitionEnded) [ended addObject:session];
+        updateInterruptionReason(
+            session, GeistCameraInterruptionCauseContention,
+            ^NSNumber *{ return cameraContentionReason(session); });
     }
-    deliverInterruptionTransitions(
-        interrupted,
-        AVCaptureSessionInterruptionReasonVideoDeviceInUseByAnotherClient,
-        ended,
-        NO
-    );
     serverRecomputeAllSlots();
 }
 
@@ -432,10 +442,7 @@ static NSDictionary *statusPayload(void) {
     return result;
 }
 
-static NSDictionary *manualInterruption(NSDictionary *request,
-                                        BOOL ending,
-                                        NSMutableArray<AVCaptureSession *> *interrupted,
-                                        NSMutableArray<AVCaptureSession *> *ended) {
+static NSDictionary *manualInterruption(NSDictionary *request, BOOL ending, BOOL *enqueuedNotification) {
     NSString *targetID = request[@"session"];
     NSNumber *reason = request[@"reason"];
     NSMutableArray *affected = [NSMutableArray array];
@@ -476,8 +483,7 @@ static NSDictionary *manualInterruption(NSDictionary *request,
         }
         GeistCameraInterruptionTransition transition = setInterruptionReason(
             session, GeistCameraInterruptionCauseManual, ending ? nil : reason);
-        if (transition == GeistCameraInterruptionTransitionBegan) [interrupted addObject:session];
-        if (transition == GeistCameraInterruptionTransitionEnded) [ended addObject:session];
+        if (transition != GeistCameraInterruptionTransitionUnchanged) *enqueuedNotification = YES;
         [affected addObject:identifier];
     }
     if (!payload) {
@@ -492,22 +498,21 @@ static NSDictionary *manualInterruption(NSDictionary *request,
 NSDictionary *cameraHandleControlRequest(NSDictionary *request) {
     NSString *requestID = request[@"requestID"] ?: @"";
     __block NSDictionary *payload;
-    NSMutableArray<AVCaptureSession *> *interrupted = [NSMutableArray array];
-    NSMutableArray<AVCaptureSession *> *ended = [NSMutableArray array];
+    __block BOOL enqueuedNotification = NO;
+    NSString *command = request[@"command"];
     void (^work)(void) = ^{
-        NSString *command = request[@"command"];
         if ([command isEqualToString:@"status"]) {
             @synchronized (s_allSessions) { payload = @{ @"data": statusPayload() }; }
         } else if ([command isEqualToString:@"interrupt"]) {
-            payload = manualInterruption(request, NO, interrupted, ended);
+            payload = manualInterruption(request, NO, &enqueuedNotification);
         } else if ([command isEqualToString:@"endInterruption"]) {
-            payload = manualInterruption(request, YES, interrupted, ended);
+            payload = manualInterruption(request, YES, &enqueuedNotification);
         }
         else payload = @{ @"error": @"Unknown camera control command" };
     };
     if ([NSThread isMainThread]) work(); else dispatch_sync(dispatch_get_main_queue(), work);
-    if (!payload[@"error"] && (interrupted.count > 0 || ended.count > 0)) {
-        deliverInterruptionTransitions(interrupted, [request[@"reason"] integerValue], ended, YES);
+    if (!payload[@"error"] && enqueuedNotification) {
+        waitForInterruptionNotifications();
     }
     NSMutableDictionary *response = [payload mutableCopy];
     response[@"requestID"] = requestID;
@@ -516,25 +521,15 @@ NSDictionary *cameraHandleControlRequest(NSDictionary *request) {
 }
 
 static void setBackgroundInterruption(BOOL interrupted) {
-    NSMutableArray<AVCaptureSession *> *newlyInterrupted = [NSMutableArray array];
-    NSMutableArray<AVCaptureSession *> *ended = [NSMutableArray array];
     NSArray<AVCaptureSession *> *sessions;
     @synchronized (s_allSessions) { sessions = s_allSessions.allObjects; }
     for (AVCaptureSession *session in sessions) {
         if (interrupted && !isSessionRunning(session)) continue;
         NSNumber *reason = interrupted
             ? @(AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableInBackground) : nil;
-        GeistCameraInterruptionTransition transition = setInterruptionReason(
+        setInterruptionReason(
             session, GeistCameraInterruptionCauseLifecycle, reason);
-        if (transition == GeistCameraInterruptionTransitionBegan) [newlyInterrupted addObject:session];
-        if (transition == GeistCameraInterruptionTransitionEnded) [ended addObject:session];
     }
-    deliverInterruptionTransitions(
-        newlyInterrupted,
-        AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableInBackground,
-        ended,
-        NO
-    );
 }
 
 void installLifecycleObservers(void) {
