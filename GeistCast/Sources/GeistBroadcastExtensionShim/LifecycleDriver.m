@@ -190,6 +190,7 @@ void GC_StartLifecycleDriver(void) {
             GC_LOG("ignoring unexpected %{public}@ message before begin", type);
         }
         GC_LOG("received begin");
+        GC_SetMicDeliveryMode(beginEnvelope[@"micDeliveryMode"] ?: @"normal");
 
         id handler = [[principal alloc] init];
         if (!handler) {

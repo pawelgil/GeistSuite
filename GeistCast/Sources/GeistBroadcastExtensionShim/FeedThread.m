@@ -84,7 +84,6 @@ void GC_StartFeedThread(id broadcastHandler) {
     gLastProgressLogTime = NSDate.timeIntervalSinceReferenceDate;
     pthread_mutex_lock(&gDeliveryLock);
     gFeedPaused = NO;
-    gMicDeliveryMode = 0;
     pthread_mutex_unlock(&gDeliveryLock);
     atomic_store(&gFeedRunning, true);
     pthread_create(&gFeedThread, NULL, FeedThreadMain, NULL);
@@ -101,6 +100,7 @@ void GC_StopFeedThread(void) {
         pthread_join(gFeedThread, NULL);
     }
     gBroadcastHandler = nil;
+    GC_SetMicDeliveryMode(@"normal");
 }
 
 void GC_SetFeedPaused(BOOL paused) {

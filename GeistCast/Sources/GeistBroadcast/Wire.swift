@@ -129,7 +129,7 @@ enum WireMessage: Equatable, Sendable {
     case userPressedStart(micEnabled: Bool)
     case userCancelledStart
     case userPressedStop
-    case begin(Broadcast)
+    case begin(Broadcast, micDeliveryMode: BroadcastMicDeliveryMode)
     case finish
     case pause(requestID: String = "")
     case resume(requestID: String = "")
@@ -181,7 +181,10 @@ struct WireDecoder {
         case "user_pressed_stop":
             return .userPressedStop
         case "begin":
-            return extractBroadcast(json).map(WireMessage.begin)
+            guard let broadcast = extractBroadcast(json) else { return nil }
+            let mode = (json["micDeliveryMode"] as? String)
+                .flatMap(BroadcastMicDeliveryMode.init(rawValue:)) ?? .normal
+            return .begin(broadcast, micDeliveryMode: mode)
         case "finish":
             return .finish
         case "pause":
@@ -305,8 +308,10 @@ struct WireEncoder {
             return ["type": "user_cancelled_start"]
         case .userPressedStop:
             return ["type": "user_pressed_stop"]
-        case .begin(let b):
-            return broadcastObject(b, type: "begin")
+        case .begin(let broadcast, let micDeliveryMode):
+            var object = broadcastObject(broadcast, type: "begin")
+            object["micDeliveryMode"] = micDeliveryMode.rawValue
+            return object
         case .finish:
             return ["type": "finish"]
         case .pause(let requestID):

@@ -348,15 +348,34 @@ import Testing
     }
 
     @Test
-    func simulateMicAudioInterruption_withConnectedExtension_writesMessageToControlSocket() async throws {
+    func simulateMicAudioInterruption_whileBroadcasting_writesMessageToControlSocket() async throws {
         let extensionConnected = AsyncSignal()
-        let delegate = SignalingDelegate(extensionConnected: extensionConnected)
+        let broadcastStarted = AsyncSignal()
+        let delegate = SignalingDelegate(
+            extensionConnected: extensionConnected,
+            broadcastStarted: broadcastStarted
+        )
         let sut = createSUT(delegate: delegate)
         try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
         let extFD = try connectClient(toSocketOf: sut)
         defer { close(extFD) }
-        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
-        await extensionConnected.wait()
+        try await driveUserPressedStart(
+            sut: sut,
+            hostFD: hostFD,
+            extFD: extFD,
+            extensionConnected: extensionConnected,
+            micEnabled: true
+        )
+        let broadcast = Broadcast(
+            simulatorUDID: sut.simulator,
+            hostAppBundleID: sut.hostBundleID,
+            extensionBundleID: "com.test.host.cast",
+            startedAt: Date()
+        )
+        try sendMessage(.broadcastStarted(broadcast), to: extFD)
+        await broadcastStarted.wait()
 
         async let change: Void = sut.simulateMicAudioInterruption(true)
         let message = try await readWireMessage(from: extFD)
@@ -372,14 +391,166 @@ import Testing
     }
 
     @Test
-    func simulateMicAudioInterruption_whenExtensionNotConnected_throwsNotConnected() async throws {
-        let sut = createSUT()
+    func setMicDelivery_beforeExtensionConnect_includesModeInFirstBegin() async throws {
+        let extensionConnected = AsyncSignal()
+        let delegate = SignalingDelegate(extensionConnected: extensionConnected)
+        let sut = createSUT(delegate: delegate)
         try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
 
-        await #expect(throws: GeistBroadcastSession.SessionError.notConnected) {
-            try await sut.simulateMicAudioInterruption(true)
+        try await sut.setMicDelivery(.withheld)
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
+        await extensionConnected.wait()
+        try sendMessage(.userPressedStart(micEnabled: true), to: hostFD)
+        let message = try await readWireMessage(from: extFD)
+
+        guard case let .begin(_, micDeliveryMode) = message else {
+            Issue.record("expected begin, got \(message)")
+            return
         }
+        #expect(micDeliveryMode == .withheld)
+        #expect(await sut.micDeliveryMode == .withheld)
+        await sut.stop()
+    }
 
+    @Test
+    func setMicDelivery_afterUserStartsBeforeExtensionConnect_includesModeInFirstBegin() async throws {
+        let extensionConnected = AsyncSignal()
+        let delegate = SignalingDelegate(extensionConnected: extensionConnected)
+        let sut = createSUT(delegate: delegate)
+        try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+
+        try await sut.setMicDelivery(.notReady)
+        try sendMessage(.userPressedStart(micEnabled: true), to: hostFD)
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
+        await extensionConnected.wait()
+        let message = try await readWireMessage(from: extFD)
+
+        guard case let .begin(_, micDeliveryMode) = message else {
+            Issue.record("expected begin, got \(message)")
+            return
+        }
+        #expect(micDeliveryMode == .notReady)
+        await sut.stop()
+    }
+
+    @Test
+    func setMicDelivery_whileExtensionConnectedButIdle_isStagedForFirstBegin() async throws {
+        let extensionConnected = AsyncSignal()
+        let delegate = SignalingDelegate(extensionConnected: extensionConnected)
+        let sut = createSUT(delegate: delegate)
+        try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
+        await extensionConnected.wait()
+
+        try await sut.setMicDelivery(.withheld)
+        try sendMessage(.userPressedStart(micEnabled: true), to: hostFD)
+        let message = try await readWireMessage(from: extFD)
+
+        guard case let .begin(_, micDeliveryMode) = message else {
+            Issue.record("expected begin, got \(message)")
+            return
+        }
+        #expect(micDeliveryMode == .withheld)
+        await sut.stop()
+    }
+
+    @Test
+    func setMicDelivery_whenBroadcastEndsBeforeControlAck_doesNotRearmMode() async throws {
+        let extensionConnected = AsyncSignal()
+        let broadcastStarted = AsyncSignal()
+        let delegate = SignalingDelegate(
+            extensionConnected: extensionConnected,
+            broadcastStarted: broadcastStarted
+        )
+        let sut = createSUT(delegate: delegate)
+        try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
+        try await driveUserPressedStart(
+            sut: sut,
+            hostFD: hostFD,
+            extFD: extFD,
+            extensionConnected: extensionConnected,
+            micEnabled: true
+        )
+        let broadcast = Broadcast(
+            simulatorUDID: sut.simulator,
+            hostAppBundleID: sut.hostBundleID,
+            extensionBundleID: "com.test.host.cast",
+            startedAt: Date()
+        )
+        try sendMessage(.broadcastStarted(broadcast), to: extFD)
+        await broadcastStarted.wait()
+
+        async let change: Void = sut.setMicDelivery(.notReady)
+        let control = try await readWireMessage(from: extFD)
+        guard case let .setMicDelivery(_, requestID) = control else {
+            Issue.record("expected setMicDelivery, got \(control)")
+            return
+        }
+        await sut.stopBroadcast()
+        #expect(try await readWireMessage(from: extFD) == .finish)
+        try sendMessage(.controlAck(requestID: requestID), to: extFD)
+        try await change
+
+        #expect(await sut.micDeliveryMode == .normal)
+        await sut.stop()
+    }
+
+    @Test
+    func setMicDelivery_whenBroadcastStartsBeforeControlAck_updatesActiveMode() async throws {
+        let extensionConnected = AsyncSignal()
+        let broadcastStarted = AsyncSignal()
+        let delegate = SignalingDelegate(
+            extensionConnected: extensionConnected,
+            broadcastStarted: broadcastStarted
+        )
+        let sut = createSUT(delegate: delegate)
+        try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
+        try await driveUserPressedStart(
+            sut: sut,
+            hostFD: hostFD,
+            extFD: extFD,
+            extensionConnected: extensionConnected,
+            micEnabled: true
+        )
+
+        async let change: Void = sut.setMicDelivery(.notReady)
+        let control = try await readWireMessage(from: extFD)
+        guard case let .setMicDelivery(_, requestID) = control else {
+            Issue.record("expected setMicDelivery, got \(control)")
+            return
+        }
+        let broadcast = Broadcast(
+            simulatorUDID: sut.simulator,
+            hostAppBundleID: sut.hostBundleID,
+            extensionBundleID: "com.test.host.cast",
+            startedAt: Date(timeIntervalSince1970: 0)
+        )
+        try sendMessage(.broadcastStarted(broadcast), to: extFD)
+        await broadcastStarted.wait()
+        try sendMessage(.controlAck(requestID: requestID), to: extFD)
+        try await change
+
+        #expect(await sut.micDeliveryMode == .notReady)
         await sut.stop()
     }
 

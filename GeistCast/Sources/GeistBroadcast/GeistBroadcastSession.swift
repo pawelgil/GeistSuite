@@ -168,6 +168,7 @@ public actor GeistBroadcastSession {
     private var userConfirmedStart: Bool = false
     private var launchTask: Task<Void, Never>?
     private var launchGeneration: UUID?
+    private var broadcastAttemptID: UUID?
     private var spawnedAppex: SpawnedAppex?
     private var broadcastEndStates: [pid_t: Bool] = [:]
     private var extensionTerminationErrors: [pid_t: ExtensionTerminationError] = [:]
@@ -339,6 +340,7 @@ public actor GeistBroadcastSession {
         launchTask?.cancel()
         launchTask = nil
         launchGeneration = nil
+        broadcastAttemptID = nil
         let stagingTask = stagedAppex
         stagedAppex = nil
         stagingTask?.cancel()
@@ -437,6 +439,7 @@ public actor GeistBroadcastSession {
     public func stopBroadcast() {
         if !activeBroadcasts.isEmpty || pendingBroadcast != nil {
             recordBroadcastEnd(normal: false)
+            finishBroadcastAttempt()
         }
         if let extFD = extensionFD {
             send(.finish, to: extFD)
@@ -552,10 +555,18 @@ public actor GeistBroadcastSession {
     }
 
     public func setMicDelivery(_ mode: BroadcastMicDeliveryMode) async throws {
+        guard let attemptID = broadcastAttemptID,
+              !activeBroadcasts.isEmpty || userConfirmedStart && pendingBroadcast != nil else {
+            micDeliveryMode = mode
+            return
+        }
         guard let extFD = extensionFD else {
-            throw SessionError.notConnected
+            if !activeBroadcasts.isEmpty { throw SessionError.notConnected }
+            micDeliveryMode = mode
+            return
         }
         try await sendControl({ .setMicDelivery(mode: mode.rawValue, requestID: $0) }, to: extFD)
+        guard broadcastAttemptID == attemptID else { return }
         micDeliveryMode = mode
     }
 
@@ -870,6 +881,7 @@ public actor GeistBroadcastSession {
             // process died for any reason). Fire the delegate and clean up.
             for broadcast in activeBroadcasts {
                 recordBroadcastEnd(normal: false, processID: process?.pid ?? peerPID)
+                finishBroadcastAttempt()
                 activeBroadcasts.remove(broadcast)
                 pausedBroadcasts.remove(broadcast)
                 delegate?.session(self, broadcastEnded: broadcast)
@@ -883,6 +895,7 @@ public actor GeistBroadcastSession {
                 // and stays stuck without an ended notification.
                 if let hostFD { send(.broadcastEnded(pending), to: hostFD) }
                 pendingBroadcast = nil
+                finishBroadcastAttempt()
             }
             userConfirmedStart = false
             detachMicSource()
@@ -944,7 +957,7 @@ public actor GeistBroadcastSession {
             disconnectedExtensionPeerPID = nil
             extensionFD = fd
             if userConfirmedStart, let broadcast = pendingBroadcast {
-                send(.begin(broadcast), to: fd)
+                send(.begin(broadcast, micDeliveryMode: micDeliveryMode), to: fd)
             }
             delegate?.session(self, extensionConnectedFor: extensionBundleID)
 
@@ -953,7 +966,7 @@ public actor GeistBroadcastSession {
             armBroadcast()
             userConfirmedStart = true
             if let extFD = extensionFD, let broadcast = pendingBroadcast {
-                send(.begin(broadcast), to: extFD)
+                send(.begin(broadcast, micDeliveryMode: micDeliveryMode), to: extFD)
             }
             attachVideoSource()
             if micEnabled {
@@ -973,6 +986,7 @@ public actor GeistBroadcastSession {
                 extensionFD = nil
             }
             pendingBroadcast = nil
+            broadcastAttemptID = nil
             userConfirmedStart = false
             detachMicSource()
             detachVideoSource()
@@ -994,6 +1008,7 @@ public actor GeistBroadcastSession {
             }
 
         case .broadcastStarted(let broadcast):
+            if broadcastAttemptID == nil { broadcastAttemptID = UUID() }
             activeBroadcasts.insert(broadcast)
             delegate?.session(self, broadcastStarted: broadcast)
             pendingBroadcast = nil
@@ -1012,6 +1027,7 @@ public actor GeistBroadcastSession {
             pausedBroadcasts.remove(broadcast)
             if wasActive {
                 recordBroadcastEnd(normal: true)
+                finishBroadcastAttempt()
                 delegate?.session(self, broadcastEnded: broadcast)
                 if let hostFD, fd != hostFD {
                     send(.broadcastEnded(broadcast), to: hostFD)
@@ -1033,12 +1049,14 @@ public actor GeistBroadcastSession {
             if let broadcast = activeBroadcasts.first {
                 activeBroadcasts.remove(broadcast)
                 pausedBroadcasts.remove(broadcast)
+                finishBroadcastAttempt()
                 delegate?.session(self, broadcast: broadcast, terminatedWithError: error)
                 if let hostFD { send(.broadcastEnded(broadcast), to: hostFD) }
             } else if let pending = pendingBroadcast {
                 delegate?.session(self, broadcastFailedToStart: pending, error: error)
                 if let hostFD { send(.broadcastEnded(pending), to: hostFD) }
                 pendingBroadcast = nil
+                finishBroadcastAttempt()
             }
             userConfirmedStart = false
             detachMicSource()
@@ -1062,7 +1080,6 @@ public actor GeistBroadcastSession {
     private func armBroadcast() {
         guard pendingBroadcast == nil else { return }
         cancelReaps()
-        micDeliveryMode = .normal
         lastBroadcastEndedNormally = nil
         lastExtensionTerminationError = nil
         spawnedAppex = nil
@@ -1075,6 +1092,7 @@ public actor GeistBroadcastSession {
         pendingBroadcast = broadcast
         log.notice("[Session \(self.hostBundleID)] armBroadcast: spawning extension \(self.extensionContext.bundleID)")
         let generation = UUID()
+        broadcastAttemptID = generation
         launchGeneration = generation
         launchTask = Task { [weak self] in await self?.launchExtension(generation: generation) }
     }
@@ -1140,6 +1158,7 @@ public actor GeistBroadcastSession {
                 delegate?.session(self, broadcastFailedToStart: pending, error: error)
             }
             pendingBroadcast = nil
+            finishBroadcastAttempt()
             userConfirmedStart = false
             finishLaunch(generation: generation)
         }
@@ -1149,6 +1168,11 @@ public actor GeistBroadcastSession {
         guard launchGeneration == generation else { return }
         launchTask = nil
         launchGeneration = nil
+    }
+
+    private func finishBroadcastAttempt() {
+        broadcastAttemptID = nil
+        micDeliveryMode = .normal
     }
 
     private func extensionLaunchEnv() throws -> [String: String] {

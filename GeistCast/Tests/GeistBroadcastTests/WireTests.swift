@@ -150,7 +150,18 @@ struct WireDecoderTests {
             #"{"type":"begin","simulatorUDID":"S","hostAppBundleID":"H","extensionBundleID":"E","startedAt":"2026-01-01T00:00:00Z"}"#
         ))
 
-        #expect(messages == [.begin(referenceBroadcast)])
+        #expect(messages == [.begin(referenceBroadcast, micDeliveryMode: .normal)])
+    }
+
+    @Test
+    func feed_beginLineWithMicDeliveryMode_yieldsSelectedMode() {
+        var sut = WireDecoder()
+
+        let messages = sut.feed(line(
+            #"{"type":"begin","simulatorUDID":"S","hostAppBundleID":"H","extensionBundleID":"E","startedAt":"2026-01-01T00:00:00Z","micDeliveryMode":"withheld"}"#
+        ))
+
+        #expect(messages == [.begin(referenceBroadcast, micDeliveryMode: .withheld)])
     }
 
     @Test
@@ -267,7 +278,7 @@ private extension WireMessage {
                micEnabled: false, macOSMicAuthorized: true, micEnabledByDefault: true),
         .userPressedStart(micEnabled: false),
         .userPressedStop,
-        .begin(makeBroadcast()),
+        .begin(makeBroadcast(), micDeliveryMode: .withheld),
         .finish,
         .pause(),
         .resume(),

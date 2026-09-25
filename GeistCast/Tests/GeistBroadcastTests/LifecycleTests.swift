@@ -112,6 +112,7 @@ import Testing
         let spy = SpyDelegate()
         let sut = createSUT(delegate: spy)
         try await sut.start()
+        try await sut.setMicDelivery(.withheld)
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
         defer { close(extFD) }
 
@@ -130,6 +131,7 @@ import Testing
         #expect(termination.error.message == "boom")
         #expect(await sut.activeBroadcasts.isEmpty)
         #expect(await sut.lastBroadcastEndedNormally == false)
+        #expect(await sut.micDeliveryMode == .normal)
 
         await sut.stop()
     }
@@ -139,6 +141,7 @@ import Testing
         let spy = SpyDelegate()
         let sut = createSUT(delegate: spy)
         try await sut.start()
+        try await sut.setMicDelivery(.withheld)
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
         defer { close(extFD) }
 
@@ -147,6 +150,7 @@ import Testing
         await spy.broadcastEndedSignal.wait()
 
         #expect(await sut.lastBroadcastEndedNormally == true)
+        #expect(await sut.micDeliveryMode == .normal)
         await sut.stop()
     }
 
@@ -196,6 +200,7 @@ import Testing
         let spy = SpyDelegate()
         let sut = createSUT(delegate: spy)
         try await sut.start()
+        try await sut.setMicDelivery(.withheld)
         let extFD = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
 
         close(extFD)
@@ -205,6 +210,7 @@ import Testing
         #expect(spy.terminations.isEmpty)
         #expect(await sut.activeBroadcasts.isEmpty)
         #expect(await sut.lastBroadcastEndedNormally == false)
+        #expect(await sut.micDeliveryMode == .normal)
 
         await sut.stop()
     }
@@ -215,6 +221,7 @@ import Testing
         let spawner = GatedSpawner()
         let sut = createSUT(delegate: spy, spawner: spawner)
         try await sut.start()
+        try await sut.setMicDelivery(.withheld)
 
         let hostFD = try connectClient(toSocketOf: sut)
         defer { close(hostFD) }
@@ -233,6 +240,7 @@ import Testing
         let failure = try #require(spy.failures.first)
         #expect(failure.error as? GeistBroadcastSession.SessionError
                 == .extensionDiedBeforeStart)
+        #expect(await sut.micDeliveryMode == .normal)
 
         spawner.release()
         await sut.stop()
@@ -260,6 +268,7 @@ import Testing
         let spawner = GatedSpawner()
         let sut = createSUT(delegate: spy, spawner: spawner)
         try await sut.start()
+        try await sut.setMicDelivery(.withheld)
 
         let hostFD = try connectClient(toSocketOf: sut)
         defer { close(hostFD) }
@@ -286,6 +295,7 @@ import Testing
         let asTermination = try #require(failure.error as? ExtensionTerminationError)
         #expect(asTermination.domain == "Pre")
         #expect(asTermination.code == 7)
+        #expect(await sut.micDeliveryMode == .normal)
 
         spawner.release()
         await sut.stop()
