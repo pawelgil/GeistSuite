@@ -1,95 +1,10 @@
-import AVFoundation
 import CommonCrypto
-import CoreMedia
-import CoreVideo
-import Foundation
 import Darwin
+import Foundation
 import GeistKit
-import Synchronization
-
-struct ExtensionContext: Sendable, Equatable {
-    let bundleID: String
-    let appexPath: String
-}
-
-public protocol GeistBroadcastSessionDelegate: AnyObject, Sendable {
-    func session(_ session: GeistBroadcastSession, broadcastStarted: Broadcast)
-    func session(_ session: GeistBroadcastSession, broadcastEnded: Broadcast)
-    func session(_ session: GeistBroadcastSession,
-                 broadcastFailedToStart broadcast: Broadcast,
-                 error: Error)
-    func session(_ session: GeistBroadcastSession,
-                 broadcast: Broadcast,
-                 terminatedWithError error: Error)
-    func session(_ session: GeistBroadcastSession, stateChanged: GeistBroadcastSession.State)
-    func session(_ session: GeistBroadcastSession, extensionConnectedFor extensionBundleID: String)
-}
-
-public extension GeistBroadcastSessionDelegate {
-    func session(_ session: GeistBroadcastSession, broadcastStarted: Broadcast) {}
-    func session(_ session: GeistBroadcastSession, broadcastEnded: Broadcast) {}
-    func session(_ session: GeistBroadcastSession,
-                 broadcastFailedToStart broadcast: Broadcast,
-                 error: Error) {}
-    func session(_ session: GeistBroadcastSession,
-                 broadcast: Broadcast,
-                 terminatedWithError error: Error) {}
-    func session(_ session: GeistBroadcastSession, stateChanged: GeistBroadcastSession.State) {}
-    func session(_ session: GeistBroadcastSession, extensionConnectedFor extensionBundleID: String) {}
-}
-
-public struct ExtensionTerminationError: Error, Equatable, Sendable {
-    public let domain: String
-    public let code: Int
-    public let message: String
-
-    public init(domain: String, code: Int, message: String) {
-        self.domain = domain
-        self.code = code
-        self.message = message
-    }
-}
-
-public enum BroadcastMicDeliveryMode: String, Sendable {
-    case normal
-    case notReady
-    case withheld
-}
 
 public actor GeistBroadcastSession {
-
-    private struct SocketPathIdentity: Equatable, Sendable {
-        let device: dev_t
-        let inode: ino_t
-    }
-
-    private struct ListenerSocket: Sendable {
-        let fd: Int32
-        let pathIdentity: SocketPathIdentity
-    }
-
-    private final class FrameWorkerToken: Sendable {
-        private let active = Mutex(true)
-
-        func deactivate() {
-            active.withLock { $0 = false }
-        }
-
-        func performIfActive<Result: Sendable>(
-            _ operation: () -> Result
-        ) -> Result? {
-            active.withLock { isActive in
-                guard isActive else { return nil }
-                return operation()
-            }
-        }
-    }
-
-    enum AcceptErrorAction: Equatable {
-        case drained
-        case fail
-        case retry
-    }
+    // MARK: Nested Types
 
     public enum State: Sendable { case idle, listening, stopped }
 
@@ -108,23 +23,32 @@ public actor GeistBroadcastSession {
         case shimDylibMissing(String)
     }
 
+    private typealias Connection = BroadcastControlTransport.Connection
+    private typealias ConnectionID = BroadcastControlTransport.ConnectionID
+
+    private struct ControlPeer {
+        let connection: Connection
+        var process: SpawnedAppex?
+    }
+
+    // MARK: Properties
+
     public nonisolated let simulator: String
     public nonisolated let hostBundleID: String
-    nonisolated let extensionContext: ExtensionContext
-
-    public nonisolated var extensionAppexPath: String { extensionContext.appexPath }
-
     public private(set) weak var delegate: (any GeistBroadcastSessionDelegate)?
     public private(set) var state: State = .idle
     public private(set) var activeBroadcasts: Set<Broadcast> = []
     public private(set) var lastBroadcastEndedNormally: Bool?
     public private(set) var lastExtensionTerminationError: ExtensionTerminationError?
 
-    private let simctlSetPath: String?
-    private let videoCapture: VideoCaptureConfig
-    private var micAudio: MicAudioConfig
     public nonisolated let socketPath: String
-    private let frameSocketPath: String
+    public private(set) var micDeliveryMode: BroadcastMicDeliveryMode = .normal
+
+    nonisolated let extensionContext: ExtensionContext
+
+    private let simctlSetPath: String?
+    private let mediaSources: BroadcastMediaSources
+    private let frameTransport: BroadcastFrameTransport
     private let stager: any AppexStaging
     private let spawner: any AppexSpawning
     private var stagedAppex: Task<StagedAppex, Error>?
@@ -132,35 +56,10 @@ public actor GeistBroadcastSession {
     private let appShimDylibPath: String?
     private let extensionShimDylibPath: String?
     private let additionalExtensionDylibPaths: [String]
-    private let encoder = WireEncoder()
-
-    private static let videoQueueCapacity = 1
-    private static let audioQueueCapacity = 16
-
-    private var listenFD: Int32 = -1
-    private var listenPathIdentity: SocketPathIdentity?
-    private var frameListenFD: Int32 = -1
-    private var frameListenPathIdentity: SocketPathIdentity?
-    private let acceptQueue = DispatchQueue(label: "com.geist.broadcast.control-accept")
-    private var acceptSource: DispatchSourceRead?
-    private let controlReadQueue = DispatchQueue(
-        label: "com.geist.broadcast.control-read",
-        attributes: .concurrent
-    )
-    private let frameAcceptQueue = DispatchQueue(label: "com.geist.broadcast.frame-accept")
-    private var frameAcceptSource: DispatchSourceRead?
-    private let frameServeQueue = DispatchQueue(
-        label: "com.geist.broadcast.frame-serve",
-        attributes: .concurrent
-    )
-    private var hostFD: Int32?
-    private var extensionFD: Int32?
-    private var controlWriters: [Int32: ControlSocketWriter] = [:]
-    private var controlProcesses: [Int32: SpawnedAppex] = [:]
-    private var controlPeerPIDs: [Int32: pid_t] = [:]
-    private var activeFrameFD: Int32?
-    private var activeFrameToken: FrameWorkerToken?
-    private var pendingFrameFD: Int32?
+    private var controlTransport: BroadcastControlTransport?
+    private var hostConnection: Connection?
+    private var extensionConnection: Connection?
+    private var controlPeers: [ConnectionID: ControlPeer] = [:]
     private var pendingBroadcast: Broadcast?
     // True once user has confirmed start (countdown ended). Until then, even
     // if the extension has connected via helloExtension, we don't send `begin`
@@ -168,26 +67,39 @@ public actor GeistBroadcastSession {
     private var userConfirmedStart: Bool = false
     private var launchTask: Task<Void, Never>?
     private var launchGeneration: UUID?
-    private var broadcastAttemptID: UUID?
+    private var attemptState = BroadcastAttemptState()
+    private var lifecycleContinuations: [UUID: AsyncStream<BroadcastLifecycleEvent>.Continuation] = [:]
     private var spawnedAppex: SpawnedAppex?
-    private var broadcastEndStates: [pid_t: Bool] = [:]
-    private var extensionTerminationErrors: [pid_t: ExtensionTerminationError] = [:]
-    private var extensionTerminations: [pid_t: ProcessTermination] = [:]
     private var reapTasks: [UUID: Task<Void, Never>] = [:]
     private var disconnectedExtensionPeerPID: pid_t?
     private var micAuthPollTask: Task<Void, Never>?
     private var lastMicAuth: Bool = false
-    private var clientFDs: Set<Int32> = []
     private var pausedBroadcasts: Set<Broadcast> = []
     private var pendingControlRequests: [String: CheckedContinuation<Void, Error>] = [:]
-    public private(set) var micDeliveryMode: BroadcastMicDeliveryMode = .normal
 
-    private var videoSource: (any BroadcastSource)?
-    private var micSource: (any BroadcastSource)?
+    // MARK: Computed Properties
 
-    private let videoQueue: BoundedFrameQueue<Data>
-    private let micQueue: BoundedFrameQueue<Data>
-    private let sink: SessionBroadcastSink
+    public nonisolated var extensionAppexPath: String {
+        extensionContext.appexPath
+    }
+
+    public var hasInFlightBroadcast: Bool {
+        !activeBroadcasts.isEmpty
+            || extensionConnection != nil
+            || pendingBroadcast != nil
+            || userConfirmedStart
+    }
+
+    public var extensionProcessID: pid_t? {
+        spawnedAppex?.pid ?? extensionConnection?.peerPID
+    }
+
+    public var isPaused: Bool {
+        guard let broadcast = activeBroadcasts.first else { return false }
+        return pausedBroadcasts.contains(broadcast)
+    }
+
+    // MARK: Lifecycle
 
     public init(
         simulator: UUID,
@@ -197,13 +109,13 @@ public actor GeistBroadcastSession {
         videoCapture: VideoCaptureConfig = .simulatorScreen,
         micAudio: MicAudioConfig = .systemMicrophone,
         additionalExtensionDylibPaths: [String] = [],
-        delegate: (any GeistBroadcastSessionDelegate)? = nil
+        delegate: (any GeistBroadcastSessionDelegate)? = nil,
     ) async throws {
         let resolved = try await ExtensionDiscovery.resolve(
             simulator: simulator,
             hostBundleID: hostBundleID,
             extensionBundleID: extensionBundleID,
-            simctlSetPath: simctlSetPath
+            simctlSetPath: simctlSetPath,
         )
         let appShim = try GeistBroadcastShimBundled.appShimDylibPath()
         let extShim = try GeistBroadcastShimBundled.extensionShimDylibPath()
@@ -212,7 +124,7 @@ public actor GeistBroadcastSession {
             hostBundleID: hostBundleID,
             extensionContext: ExtensionContext(
                 bundleID: resolved.extensionBundleID,
-                appexPath: resolved.appexPath
+                appexPath: resolved.appexPath,
             ),
             simctlSetPath: simctlSetPath,
             videoCapture: videoCapture,
@@ -222,16 +134,7 @@ public actor GeistBroadcastSession {
             spawner: AppexSpawner(),
             appShimDylibPath: appShim,
             extensionShimDylibPath: extShim,
-            additionalExtensionDylibPaths: additionalExtensionDylibPaths
-        )
-    }
-
-    public static func broadcastCapableApps(
-        simulator: UUID,
-        simctlSetPath: String? = nil
-    ) async throws -> [BroadcastApp] {
-        try await ExtensionDiscovery.broadcastCapableApps(
-            simulator: simulator, simctlSetPath: simctlSetPath
+            additionalExtensionDylibPaths: additionalExtensionDylibPaths,
         )
     }
 
@@ -247,286 +150,64 @@ public actor GeistBroadcastSession {
         spawner: any AppexSpawning,
         appShimDylibPath: String? = nil,
         extensionShimDylibPath: String? = nil,
-        additionalExtensionDylibPaths: [String] = []
+        additionalExtensionDylibPaths: [String] = [],
     ) {
-        self.simulator = simulatorUDID
+        simulator = simulatorUDID
         self.hostBundleID = hostBundleID
         self.extensionContext = extensionContext
         self.simctlSetPath = simctlSetPath
-        self.videoCapture = videoCapture
-        self.micAudio = micAudio
-        self.socketPath = Self.conventionalSocketPath(
-            simulator: simulatorUDID, bundleID: hostBundleID
+        socketPath = Self.conventionalSocketPath(
+            simulator: simulatorUDID, bundleID: hostBundleID,
         )
-        self.frameSocketPath = Self.conventionalFrameSocketPath(
-            simulator: simulatorUDID, bundleID: hostBundleID
-        )
+        let frameTransport = BroadcastFrameTransport(path: Self.conventionalFrameSocketPath(
+            simulator: simulatorUDID, bundleID: hostBundleID,
+        ))
+        self.frameTransport = frameTransport
         self.delegate = delegate
         self.stager = stager
         self.spawner = spawner
         let appexPath = extensionContext.appexPath
-        self.stagedAppex = Task.detached(priority: .utility) {
+        // Staging captures only Sendable inputs and must not block the session actor.
+        stagedAppex = Task.detached(priority: .utility) {
             try await stager.stage(appexAt: appexPath)
         }
-        self.lastStagedSourceHash = Self.sourceBinaryHash(appexPath: appexPath)
+        lastStagedSourceHash = Self.sourceBinaryHash(appexPath: appexPath)
         self.appShimDylibPath = appShimDylibPath
         self.extensionShimDylibPath = extensionShimDylibPath
         self.additionalExtensionDylibPaths = additionalExtensionDylibPaths
-        let videoQueue = BoundedFrameQueue<Data>(capacity: GeistBroadcastSession.videoQueueCapacity)
-        let micQueue = BoundedFrameQueue<Data>(capacity: GeistBroadcastSession.audioQueueCapacity)
-        self.videoQueue = videoQueue
-        self.micQueue = micQueue
-        self.sink = SessionBroadcastSink(videoQueue: videoQueue, micQueue: micQueue)
+        mediaSources = BroadcastMediaSources(
+            simulator: simulatorUDID, simctlSetPath: simctlSetPath,
+            videoCapture: videoCapture, micAudio: micAudio, sink: frameTransport.sink,
+        )
     }
 
-    // Both the macOS host and the iOS simulator derive this path independently
-    // from (simulator UDID, host bundle ID) — there is no handshake. `/tmp/`
-    // is the only directory they see at the same filesystem location.
+    // MARK: Static Functions
+
+    public static func broadcastCapableApps(
+        simulator: UUID,
+        simctlSetPath: String? = nil,
+    ) async throws -> [BroadcastApp] {
+        try await ExtensionDiscovery.broadcastCapableApps(
+            simulator: simulator, simctlSetPath: simctlSetPath,
+        )
+    }
+
+    /// Both the macOS host and the iOS simulator derive this path independently
+    /// from (simulator UDID, host bundle ID) — there is no handshake. `/tmp/`
+    /// is the only directory they see at the same filesystem location.
     private static func conventionalSocketPath(
-        simulator: String, bundleID: String
+        simulator: String, bundleID: String,
     ) -> String {
         "/tmp/geistcast-\(simulator)-\(bundleID).sock"
     }
 
     private static func conventionalFrameSocketPath(
-        simulator: String, bundleID: String
+        simulator: String, bundleID: String,
     ) -> String {
         "/tmp/geistcast-frames-\(simulator)-\(bundleID).sock"
     }
 
-    public nonisolated func injectionEnv() throws -> [String: String] {
-        var env: [String: String] = ["GEISTCAST_SOCKET": socketPath]
-        if let path = appShimDylibPath {
-            // Path was resolved at init; re-verify the file is still on disk —
-            // e.g. Xcode wiping DerivedData while GeistCast keeps running.
-            guard FileManager.default.fileExists(atPath: path) else {
-                throw SessionError.shimDylibMissing(path)
-            }
-            env["DYLD_INSERT_LIBRARIES"] = path
-        }
-        return env
-    }
-
-    public func start() throws {
-        guard state == .idle else { throw SessionError.alreadyStarted }
-        try openListenSocket()
-        do {
-            try openFrameListenSocket()
-        } catch {
-            Self.unlinkOwnedPath(socketPath, identity: listenPathIdentity)
-            close(listenFD)
-            listenFD = -1
-            listenPathIdentity = nil
-            throw error
-        }
-        transition(to: .listening)
-        spawnAcceptLoop()
-        spawnFrameAcceptLoop()
-        lastMicAuth = isMacOSMicAuthorized
-        micAuthPollTask = Task { [weak self] in await self?.pollMicAuth() }
-        let bundle = hostBundleID, path = socketPath
-        log.notice("[Session \(bundle)] start: listening at \(path)")
-    }
-
-    public func stop() {
-        let bundle = hostBundleID
-        log.notice("[Session \(bundle)] stop")
-        videoSource?.stop()
-        videoSource = nil
-        micSource?.stop()
-        micSource = nil
-        micAuthPollTask?.cancel()
-        micAuthPollTask = nil
-        launchTask?.cancel()
-        launchTask = nil
-        launchGeneration = nil
-        broadcastAttemptID = nil
-        let stagingTask = stagedAppex
-        stagedAppex = nil
-        stagingTask?.cancel()
-        cancelReaps()
-        videoQueue.close()
-        micQueue.close()
-        // Dispatch-source cancellation owns listener close; shutdown wakes
-        // blocking per-connection reads and writes before worker-owned close.
-        if listenFD >= 0 {
-            Self.unlinkOwnedPath(socketPath, identity: listenPathIdentity)
-            acceptSource?.cancel()
-            listenFD = -1
-            listenPathIdentity = nil
-        }
-        if frameListenFD >= 0 {
-            Self.unlinkOwnedPath(frameSocketPath, identity: frameListenPathIdentity)
-            frameAcceptSource?.cancel()
-            frameListenFD = -1
-            frameListenPathIdentity = nil
-        }
-        if let pendingFrameFD {
-            shutdown(pendingFrameFD, SHUT_RDWR)
-            closeClientFD(pendingFrameFD)
-            self.pendingFrameFD = nil
-        }
-        for fd in clientFDs { shutdown(fd, SHUT_RDWR) }
-        activeFrameToken?.deactivate()
-        hostFD = nil
-        extensionFD = nil
-        broadcastEndStates.removeAll()
-        extensionTerminationErrors.removeAll()
-        extensionTerminations.removeAll()
-        pausedBroadcasts.removeAll()
-        transition(to: .stopped)
-    }
-
-    private func registerClientFD(_ fd: Int32) {
-        clientFDs.insert(fd)
-    }
-
-    private func closeClientFD(_ fd: Int32) {
-        if clientFDs.remove(fd) != nil {
-            close(fd)
-        }
-    }
-
-    private func registerControlFD(_ fd: Int32) {
-        registerClientFD(fd)
-        controlWriters[fd] = ControlSocketWriter(fd: fd, onFailure: {})
-        controlPeerPIDs[fd] = Self.peerProcessID(fd: fd)
-        associateControlProcessIfKnown(fd: fd)
-    }
-
-    private func associateControlProcessIfKnown(fd: Int32) {
-        guard controlProcesses[fd] == nil,
-              let process = spawnedAppex,
-              controlPeerPIDs[fd] == process.pid else { return }
-        controlProcesses[fd] = process
-    }
-
-    nonisolated private static func peerProcessID(fd: Int32) -> pid_t? {
-        var pid: pid_t = 0
-        var size = socklen_t(MemoryLayout<pid_t>.size)
-        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0 else { return nil }
-        return pid
-    }
-
-    public var hasInFlightBroadcast: Bool {
-        !activeBroadcasts.isEmpty
-            || extensionFD != nil
-            || pendingBroadcast != nil
-            || userConfirmedStart
-    }
-
-    public var extensionProcessID: pid_t? {
-        spawnedAppex?.pid ?? extensionFD.flatMap { controlPeerPIDs[$0] }
-    }
-
-    public var extensionTerminationStatus: Int32? { spawnedAppex?.termination.value }
-
-    public func extensionTerminationStatus(for processID: pid_t) -> Int32? {
-        extensionTerminations[processID]?.value
-    }
-
-    public func extensionTerminationError(for processID: pid_t) -> ExtensionTerminationError? {
-        extensionTerminationErrors[processID]
-    }
-
-    public func broadcastEndedNormally(for processID: pid_t) -> Bool? {
-        broadcastEndStates[processID]
-    }
-
-    /// Always forwards `.broadcastEnded` to the host shim, even when no
-    /// `.broadcastStarted` ever arrived — the host's `gFakeCaptured` was
-    /// already flipped on at user confirm and stays stuck otherwise.
-    public func stopBroadcast() {
-        if !activeBroadcasts.isEmpty || pendingBroadcast != nil {
-            recordBroadcastEnd(normal: false)
-            finishBroadcastAttempt()
-        }
-        if let extFD = extensionFD {
-            send(.finish, to: extFD)
-            extensionFD = nil
-        }
-        for broadcast in activeBroadcasts {
-            activeBroadcasts.remove(broadcast)
-            pausedBroadcasts.remove(broadcast)
-            delegate?.session(self, broadcastEnded: broadcast)
-            if let hostFD { send(.broadcastEnded(broadcast), to: hostFD) }
-        }
-        if let pending = pendingBroadcast {
-            if let hostFD { send(.broadcastEnded(pending), to: hostFD) }
-            pendingBroadcast = nil
-        }
-        userConfirmedStart = false
-        launchTask?.cancel()
-        launchTask = nil
-        launchGeneration = nil
-        detachMicSource()
-        detachVideoSource()
-    }
-
-    public var isPaused: Bool {
-        guard let broadcast = activeBroadcasts.first else { return false }
-        return pausedBroadcasts.contains(broadcast)
-    }
-
-    public func pause() async throws {
-        guard let broadcast = activeBroadcasts.first else {
-            throw SessionError.notBroadcasting
-        }
-        guard let extFD = extensionFD else {
-            throw SessionError.notConnected
-        }
-        guard !pausedBroadcasts.contains(broadcast) else { throw SessionError.alreadyPaused }
-        pausedBroadcasts.insert(broadcast)
-        do {
-            try await sendControl({ .pause(requestID: $0) }, to: extFD)
-        } catch {
-            pausedBroadcasts.remove(broadcast)
-            throw error
-        }
-    }
-
-    public func resume() async throws {
-        guard let broadcast = activeBroadcasts.first else {
-            throw SessionError.notBroadcasting
-        }
-        guard let extFD = extensionFD else {
-            throw SessionError.notConnected
-        }
-        guard pausedBroadcasts.contains(broadcast) else { throw SessionError.notPaused }
-        pausedBroadcasts.remove(broadcast)
-        do {
-            try await sendControl({ .resume(requestID: $0) }, to: extFD)
-        } catch {
-            pausedBroadcasts.insert(broadcast)
-            throw error
-        }
-    }
-
-    /// Takes effect on the next broadcast; an in-flight broadcast keeps its
-    /// existing mic source until it ends.
-    public func setMicAudio(_ config: MicAudioConfig) {
-        micAudio = config
-    }
-
-    /// Re-stage the appex in the background if the source binary's hash has
-    /// changed since we last staged. Skipped while a broadcast is in flight
-    /// or pending — swapping out from under an active spawn would race.
-    public func refreshStagedAppexIfNeeded() {
-        guard state != .stopped else { return }
-        guard pendingBroadcast == nil, activeBroadcasts.isEmpty else { return }
-        let appexPath = extensionContext.appexPath
-        guard let currentHash = Self.sourceBinaryHash(appexPath: appexPath) else { return }
-        if currentHash == lastStagedSourceHash { return }
-        lastStagedSourceHash = currentHash
-        let stager = self.stager
-        let previousStagingTask = stagedAppex
-        stagedAppex = Task.detached(priority: .utility) {
-            try await stager.stage(appexAt: appexPath)
-        }
-        previousStagingTask?.cancel()
-    }
-
-    nonisolated private static func sourceBinaryHash(appexPath: String) -> String? {
+    private nonisolated static func sourceBinaryHash(appexPath: String) -> String? {
         let appexURL = URL(fileURLWithPath: appexPath)
         let executableName = (appexPath as NSString).lastPathComponent
             .replacingOccurrences(of: ".appex", with: "")
@@ -550,34 +231,262 @@ public actor GeistBroadcastSession {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    private static func sessionError(_ error: any Error) -> any Error {
+        if error is BroadcastFrameTransport.Error || error is BroadcastControlTransport.Error {
+            return SessionError.alreadyStarted
+        }
+        guard let error = error as? UnixSocketListener.Error else { return error }
+        return switch error {
+        case let .socketCreate(code): SessionError.socketCreate(errno: code)
+        case let .bind(code): SessionError.bind(errno: code)
+        case let .listen(code): SessionError.listen(errno: code)
+        }
+    }
+
+    // MARK: Functions
+
+    public nonisolated func injectionEnv() throws -> [String: String] {
+        var env: [String: String] = ["GEISTCAST_SOCKET": socketPath]
+        if let path = appShimDylibPath {
+            // Path was resolved at init; re-verify the file is still on disk —
+            // e.g. Xcode wiping DerivedData while GeistCast keeps running.
+            guard FileManager.default.fileExists(atPath: path) else {
+                throw SessionError.shimDylibMissing(path)
+            }
+            env["DYLD_INSERT_LIBRARIES"] = path
+        }
+        return env
+    }
+
+    public func start() throws {
+        guard state == .idle else { throw SessionError.alreadyStarted }
+        try startTransports()
+        transition(to: .listening)
+        lastMicAuth = mediaSources.isMacOSMicAuthorized
+        micAuthPollTask = Task { [weak self] in await self?.pollMicAuth() }
+        let bundle = hostBundleID, path = socketPath
+        log.notice("[Session \(bundle)] start: listening at \(path)")
+    }
+
+    public func stop() {
+        for continuation in lifecycleContinuations.values {
+            continuation.finish()
+        }
+        lifecycleContinuations.removeAll()
+        let bundle = hostBundleID
+        log.notice("[Session \(bundle)] stop")
+        mediaSources.stopAll()
+        micAuthPollTask?.cancel()
+        micAuthPollTask = nil
+        launchTask?.cancel()
+        launchTask = nil
+        launchGeneration = nil
+        attemptState.discard()
+        let stagingTask = stagedAppex
+        stagedAppex = nil
+        stagingTask?.cancel()
+        cancelReaps()
+        frameTransport.stop()
+        controlTransport?.stop()
+        hostConnection = nil
+        extensionConnection = nil
+        pausedBroadcasts.removeAll()
+        transition(to: .stopped)
+    }
+
+    public func lifecycleEvents() -> AsyncStream<BroadcastLifecycleEvent> {
+        let pair = AsyncStream<BroadcastLifecycleEvent>.makeStream()
+        let id = UUID()
+        lifecycleContinuations[id] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeLifecycleObserver(id) }
+        }
+        if let event = attemptState.processStarted(processID: extensionProcessID) {
+            pair.continuation.yield(event)
+        }
+        if state == .stopped { pair.continuation.finish() }
+        return pair.stream
+    }
+
+    public func snapshot() -> BroadcastSessionSnapshot {
+        let lifecycle: BroadcastSessionSnapshot.Lifecycle = if isPaused { .paused }
+        else if !activeBroadcasts.isEmpty { .recording }
+        else if attemptState.id != nil { .starting }
+        else { .idle }
+        return BroadcastSessionSnapshot(
+            lifecycle: lifecycle,
+            micDelivery: micDeliveryMode,
+            attemptID: attemptState.id,
+            processID: extensionProcessID,
+            attemptSequence: attemptState.sequence,
+        )
+    }
+
+    @discardableResult
+    public func stopBroadcast() -> BroadcastEnd? {
+        let end = endAttempt(reason: .stopped)
+        if let extensionClient = extensionConnection {
+            send(.finish, to: extensionClient)
+            extensionConnection = nil
+        }
+        for broadcast in activeBroadcasts {
+            activeBroadcasts.remove(broadcast)
+            pausedBroadcasts.remove(broadcast)
+            delegate?.session(self, broadcastEnded: broadcast)
+            if let hostConnection { send(.broadcastEnded(broadcast), to: hostConnection) }
+        }
+        if let pending = pendingBroadcast {
+            if let hostConnection { send(.broadcastEnded(pending), to: hostConnection) }
+            pendingBroadcast = nil
+        }
+        userConfirmedStart = false
+        launchTask?.cancel()
+        launchTask = nil
+        launchGeneration = nil
+        mediaSources.setMicEnabled(false)
+        mediaSources.stopVideo()
+        return end
+    }
+
+    public func pause() async throws {
+        guard let broadcast = activeBroadcasts.first else {
+            throw SessionError.notBroadcasting
+        }
+        guard let extensionClient = extensionConnection else {
+            throw SessionError.notConnected
+        }
+        guard !pausedBroadcasts.contains(broadcast) else { throw SessionError.alreadyPaused }
+        pausedBroadcasts.insert(broadcast)
+        do {
+            try await sendControl({ .pause(requestID: $0) }, to: extensionClient)
+        } catch {
+            pausedBroadcasts.remove(broadcast)
+            throw error
+        }
+    }
+
+    public func resume() async throws {
+        guard let broadcast = activeBroadcasts.first else {
+            throw SessionError.notBroadcasting
+        }
+        guard let extensionClient = extensionConnection else {
+            throw SessionError.notConnected
+        }
+        guard pausedBroadcasts.contains(broadcast) else { throw SessionError.notPaused }
+        pausedBroadcasts.remove(broadcast)
+        do {
+            try await sendControl({ .resume(requestID: $0) }, to: extensionClient)
+        } catch {
+            pausedBroadcasts.insert(broadcast)
+            throw error
+        }
+    }
+
+    /// Takes effect on the next broadcast; an in-flight broadcast keeps its
+    /// existing mic source until it ends.
+    public func setMicAudio(_ config: MicAudioConfig) {
+        mediaSources.setMicAudio(config)
+    }
+
+    /// Re-stage the appex in the background if the source binary's hash has
+    /// changed since we last staged. Skipped while a broadcast is in flight
+    /// or pending — swapping out from under an active spawn would race.
+    public func refreshStagedAppexIfNeeded() {
+        guard state != .stopped else { return }
+        guard pendingBroadcast == nil, activeBroadcasts.isEmpty else { return }
+        let appexPath = extensionContext.appexPath
+        guard let currentHash = Self.sourceBinaryHash(appexPath: appexPath) else { return }
+        if currentHash == lastStagedSourceHash { return }
+        lastStagedSourceHash = currentHash
+        let stager = stager
+        let previousStagingTask = stagedAppex
+        // Staging captures only Sendable inputs and must not block the session actor.
+        stagedAppex = Task.detached(priority: .utility) {
+            try await stager.stage(appexAt: appexPath)
+        }
+        previousStagingTask?.cancel()
+    }
+
     public func simulateMicAudioInterruption(_ active: Bool) async throws {
         try await setMicDelivery(active ? .notReady : .normal)
     }
 
     public func setMicDelivery(_ mode: BroadcastMicDeliveryMode) async throws {
-        guard let attemptID = broadcastAttemptID,
-              !activeBroadcasts.isEmpty || userConfirmedStart && pendingBroadcast != nil else {
+        guard let attemptID = attemptState.id,
+              !activeBroadcasts.isEmpty || userConfirmedStart && pendingBroadcast != nil
+        else {
             micDeliveryMode = mode
             return
         }
-        guard let extFD = extensionFD else {
+        guard let extensionClient = extensionConnection else {
             if !activeBroadcasts.isEmpty { throw SessionError.notConnected }
             micDeliveryMode = mode
             return
         }
-        try await sendControl({ .setMicDelivery(mode: mode.rawValue, requestID: $0) }, to: extFD)
-        guard broadcastAttemptID == attemptID else { return }
+        try await sendControl({ .setMicDelivery(mode: mode.rawValue, requestID: $0) }, to: extensionClient)
+        guard attemptState.id == attemptID else { return }
         micDeliveryMode = mode
+    }
+
+    private func startTransports() throws {
+        let control = BroadcastControlTransport(path: socketPath)
+        do {
+            try control.start { [weak self, weak control] event in
+                guard let control else { return }
+                await self?.receive(event, from: control)
+            }
+            try frameTransport.start { [weak self] in
+                Task { await self?.frameTransportFailed() }
+            }
+        } catch {
+            control.stop()
+            throw Self.sessionError(error)
+        }
+        controlTransport = control
+    }
+
+    private func receive(_ event: BroadcastControlTransport.Event, from transport: BroadcastControlTransport) {
+        guard controlTransport === transport else { return }
+        switch event {
+        case let .connected(connection):
+            guard state == .listening else { transport.shutdown(connection.id); return }
+            controlPeers[connection.id] = ControlPeer(connection: connection)
+            associateControlProcessIfKnown(connection)
+        case let .messages(connection, messages):
+            ingest(messages, from: connection)
+        case let .disconnected(connection):
+            connectionEnded(connection)
+        case .listenerFailed:
+            guard state == .listening else { return }
+            stop()
+        }
+    }
+
+    private func associateControlProcessIfKnown(_ connection: Connection) {
+        guard let peer = controlPeers[connection.id], peer.process == nil,
+              let process = spawnedAppex,
+              connection.peerPID == process.pid else { return }
+        controlPeers[connection.id]?.process = process
+    }
+
+    private func removeLifecycleObserver(_ id: UUID) {
+        lifecycleContinuations.removeValue(forKey: id)
+    }
+
+    private func emitLifecycle(_ event: BroadcastLifecycleEvent) {
+        for continuation in lifecycleContinuations.values {
+            continuation.yield(event)
+        }
     }
 
     private func sendControl(
         _ message: (String) -> WireMessage,
-        to fd: Int32
+        to connection: Connection,
     ) async throws {
         let requestID = UUID().uuidString
         try await withCheckedThrowingContinuation { continuation in
             pendingControlRequests[requestID] = continuation
-            send(message(requestID), to: fd)
+            send(message(requestID), to: connection)
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(5))
                 await self?.timeOutControlRequest(requestID)
@@ -594,283 +503,16 @@ public actor GeistBroadcastSession {
         delegate?.session(self, stateChanged: newState)
     }
 
-    private func attachVideoSource() {
-        guard videoSource == nil else { return }
-        let source: any BroadcastSource
-        switch videoCapture {
-        case .simulatorScreen:
-            guard let udid = UUID(uuidString: simulator) else {
-                log.warn("Session: simulator '\(self.simulator)' is not a valid UUID; skipping simulator-screen capture")
-                return
-            }
-            do {
-                source = try SimulatorScreenBroadcastSource(
-                    udid: udid, simctlSetPath: simctlSetPath
-                )
-            } catch {
-                log.warn("Session: simulator-screen capture init failed: \(error)")
-                return
-            }
-        case .custom(let producer):
-            source = CustomVideoBroadcastSource(producer)
+    private func connectionEnded(_ connection: Connection) {
+        let process = controlPeers.removeValue(forKey: connection.id)?.process
+        let peerPID = connection.peerPID
+        if hostConnection == connection {
+            log.notice("[Session \(hostBundleID)] host connection closed (connection=\(String(describing: connection.id)))")
+            hostConnection = nil
         }
-        do {
-            try source.start(into: sink)
-            videoSource = source
-        } catch {
-            log.warn("Session: video source start failed: \(error)")
-        }
-    }
-
-    private func detachVideoSource() {
-        videoSource?.stop()
-        videoSource = nil
-    }
-
-    /// Host mic TCC only gates `.systemMicrophone` — a file or custom
-    /// producer never touches the real microphone, so it's always available.
-    private var isMacOSMicAuthorized: Bool {
-        switch micAudio {
-        case .systemMicrophone:
-            AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        case .mediaFile, .custom:
-            true
-        case .disabled:
-            false
-        }
-    }
-
-    /// Whether the picker's mic toggle should start on without the user
-    /// tapping it. Only true for sources with no privacy-sensitive consent
-    /// to gate — `.systemMicrophone` keeps defaulting off even when
-    /// authorized, so a human still opts in to sharing their real voice.
-    private var isMicEnabledByDefault: Bool {
-        switch micAudio {
-        case .mediaFile, .custom:
-            true
-        case .systemMicrophone, .disabled:
-            false
-        }
-    }
-
-    private func attachMicSource() {
-        guard micSource == nil else { return }
-        let source: (any BroadcastSource)?
-        switch micAudio {
-        case .systemMicrophone: source = SystemMicrophoneBroadcastSource()
-        case .mediaFile(let url): source = MediaFileMicAudioSource(url: url)
-        case .custom(let producer): source = CustomMicAudioBroadcastSource(producer)
-        case .disabled: source = nil
-        }
-        guard let source else { return }
-        do {
-            try source.start(into: sink)
-            micSource = source
-        } catch {
-            log.warn("Session: mic source attach failed: \(error)")
-        }
-    }
-
-    private func detachMicSource() {
-        micSource?.stop()
-        micSource = nil
-    }
-
-    private func openListenSocket() throws {
-        let listener = try Self.openUnixListener(path: socketPath, backlog: 8)
-        listenFD = listener.fd
-        listenPathIdentity = listener.pathIdentity
-    }
-
-    private static func openUnixListener(path: String, backlog: Int32) throws -> ListenerSocket {
-        unlink(path)
-
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw SessionError.socketCreate(errno: errno) }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathCapacity = MemoryLayout.size(ofValue: addr.sun_path)
-        guard path.utf8.count < pathCapacity else {
-            close(fd)
-            throw SessionError.bind(errno: ENAMETOOLONG)
-        }
-        _ = path.withCString { src in
-            withUnsafeMutablePointer(to: &addr.sun_path) { tuplePtr in
-                tuplePtr.withMemoryRebound(to: CChar.self, capacity: pathCapacity) { dst in
-                    strlcpy(dst, src, pathCapacity)
-                }
-            }
-        }
-
-        let bindResult = withUnsafePointer(to: &addr) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                bind(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            let err = errno
-            close(fd)
-            throw SessionError.bind(errno: err)
-        }
-        guard let pathIdentity = socketPathIdentity(path) else {
-            let err = errno
-            close(fd)
-            throw SessionError.bind(errno: err)
-        }
-
-        guard listen(fd, backlog) == 0 else {
-            let err = errno
-            unlinkOwnedPath(path, identity: pathIdentity)
-            close(fd)
-            throw SessionError.listen(errno: err)
-        }
-        let flags = fcntl(fd, F_GETFL)
-        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
-            let err = errno
-            unlinkOwnedPath(path, identity: pathIdentity)
-            close(fd)
-            throw SessionError.listen(errno: err)
-        }
-
-        return ListenerSocket(fd: fd, pathIdentity: pathIdentity)
-    }
-
-    nonisolated private static func socketPathIdentity(_ path: String) -> SocketPathIdentity? {
-        var info = stat()
-        guard lstat(path, &info) == 0 else { return nil }
-        return SocketPathIdentity(device: info.st_dev, inode: info.st_ino)
-    }
-
-    nonisolated private static func unlinkOwnedPath(
-        _ path: String,
-        identity: SocketPathIdentity?
-    ) {
-        guard let identity, socketPathIdentity(path) == identity else { return }
-        unlink(path)
-    }
-
-    private func spawnAcceptLoop() {
-        let fd = listenFD
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: acceptQueue)
-        source.setEventHandler { [weak self] in
-            while true {
-                let clientFD = accept(fd, nil, nil)
-                if clientFD < 0 {
-                    switch Self.acceptErrorAction(errno: errno) {
-                    case .retry:
-                        continue
-                    case .drained:
-                        return
-                    case .fail:
-                        source.cancel()
-                        Task { await self?.acceptLoopFailed(fd: fd, isFrameListener: false) }
-                        return
-                    }
-                }
-                Self.makeBlocking(clientFD)
-                // Writing to a half-closed socket otherwise raises SIGPIPE
-                // and terminates the host process. Per-socket is preferable
-                // to a process-wide signal handler.
-                var noSigPipe: Int32 = 1
-                setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE,
-                           &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-                let completed = DispatchSemaphore(value: 0)
-                Task { [weak self] in
-                    defer { completed.signal() }
-                    guard let self else {
-                        shutdown(clientFD, SHUT_RDWR)
-                        close(clientFD)
-                        return
-                    }
-                    await self.acceptControlConnection(clientFD)
-                }
-                completed.wait()
-            }
-        }
-        source.setCancelHandler { close(fd) }
-        acceptSource = source
-        source.activate()
-    }
-
-    nonisolated private static func makeBlocking(_ fd: Int32) {
-        let flags = fcntl(fd, F_GETFL)
-        if flags >= 0 { _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) }
-    }
-
-    private func acceptControlConnection(_ fd: Int32) {
-        guard state == .listening else {
-            shutdown(fd, SHUT_RDWR)
-            close(fd)
-            return
-        }
-        registerControlFD(fd)
-        startReadLoop(fd: fd)
-    }
-
-    static func acceptErrorAction(errno: Int32) -> AcceptErrorAction {
-        if errno == EINTR { return .retry }
-        if errno == EAGAIN || errno == EWOULDBLOCK { return .drained }
-        return .fail
-    }
-
-    private func acceptLoopFailed(fd: Int32, isFrameListener: Bool) {
-        let ownsListener = isFrameListener ? frameListenFD == fd : listenFD == fd
-        guard ownsListener, state == .listening else { return }
-        stop()
-    }
-
-    // Blocking socket calls stay off Swift's cooperative executor.
-    private nonisolated func startReadLoop(fd clientFD: Int32) {
-        // stop() shuts down the fd, bounding this retention through owner cleanup.
-        controlReadQueue.async { [self] in
-            var decoder = WireDecoder()
-            var buf = [UInt8](repeating: 0, count: 4096)
-            while true {
-                let n = buf.withUnsafeMutableBufferPointer { bp in
-                    read(clientFD, bp.baseAddress, bp.count)
-                }
-                if n <= 0 {
-                    let completed = DispatchSemaphore(value: 0)
-                    Task {
-                        await self.connectionEnded(fd: clientFD)
-                        completed.signal()
-                    }
-                    completed.wait()
-                    return
-                }
-                let chunk = Data(buf[0..<n])
-                let messages = decoder.feed(chunk)
-                if !messages.isEmpty {
-                    let completed = DispatchSemaphore(value: 0)
-                    Task {
-                        await self.ingest(messages, from: clientFD)
-                        completed.signal()
-                    }
-                    completed.wait()
-                }
-            }
-        }
-    }
-
-    private func connectionEnded(fd: Int32) {
-        guard clientFDs.remove(fd) != nil else { return }
-        let process = controlProcesses.removeValue(forKey: fd)
-        let peerPID = controlPeerPIDs.removeValue(forKey: fd)
-        shutdown(fd, SHUT_RDWR)
-        let writer = controlWriters.removeValue(forKey: fd)
-        if let writer {
-            writer.close { close(fd) }
-        } else {
-            close(fd)
-        }
-        if hostFD == fd {
-            log.notice("[Session \(self.hostBundleID)] host fd closed (fd=\(fd))")
-            hostFD = nil
-        }
-        if extensionFD == fd {
-            log.notice("[Session \(self.hostBundleID)] extension fd closed (fd=\(fd)) activeBroadcasts=\(self.activeBroadcasts.count) pending=\(self.pendingBroadcast != nil)")
-            extensionFD = nil
+        if extensionConnection == connection {
+            log.notice("[Session \(hostBundleID)] extension connection closed (connection=\(String(describing: connection.id))) activeBroadcasts=\(activeBroadcasts.count) pending=\(pendingBroadcast != nil)")
+            extensionConnection = nil
             let requests = pendingControlRequests.values
             pendingControlRequests.removeAll()
             for request in requests {
@@ -880,26 +522,23 @@ public actor GeistBroadcastSession {
             // signal we have that the broadcast actually ended (extension
             // process died for any reason). Fire the delegate and clean up.
             for broadcast in activeBroadcasts {
-                recordBroadcastEnd(normal: false, processID: process?.pid ?? peerPID)
-                finishBroadcastAttempt()
+                endAttempt(reason: .disconnected, processID: process?.pid ?? peerPID)
                 activeBroadcasts.remove(broadcast)
                 pausedBroadcasts.remove(broadcast)
                 delegate?.session(self, broadcastEnded: broadcast)
-                if let hostFD { send(.broadcastEnded(broadcast), to: hostFD) }
+                if let hostConnection { send(.broadcastEnded(broadcast), to: hostConnection) }
             }
             if let pending = pendingBroadcast {
+                endAttempt(reason: .disconnected, processID: process?.pid ?? peerPID)
                 delegate?.session(self,
                                   broadcastFailedToStart: pending,
                                   error: SessionError.extensionDiedBeforeStart)
-                // Host shim's gFakeCaptured was flipped on at user confirm
-                // and stays stuck without an ended notification.
-                if let hostFD { send(.broadcastEnded(pending), to: hostFD) }
+                if let hostConnection { send(.broadcastEnded(pending), to: hostConnection) }
                 pendingBroadcast = nil
-                finishBroadcastAttempt()
             }
             userConfirmedStart = false
-            detachMicSource()
-            detachVideoSource()
+            mediaSources.setMicEnabled(false)
+            mediaSources.stopVideo()
             if let process {
                 scheduleDisconnectedExtensionReap(process)
             } else {
@@ -910,7 +549,7 @@ public actor GeistBroadcastSession {
 
     private func scheduleDisconnectedExtensionReap(_ process: SpawnedAppex) {
         cancelReaps()
-        let spawner = self.spawner
+        let spawner = spawner
         reapTasks[process.generation] = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             if !Task.isCancelled { await spawner.terminate(process) }
@@ -919,167 +558,191 @@ public actor GeistBroadcastSession {
     }
 
     private func cancelReaps() {
-        for task in reapTasks.values { task.cancel() }
+        for task in reapTasks.values {
+            task.cancel()
+        }
     }
 
     private func reapFinished(generation: UUID) {
         reapTasks.removeValue(forKey: generation)
     }
 
-    private func ingest(_ messages: [WireMessage], from fd: Int32) {
-        guard state == .listening, clientFDs.contains(fd) else { return }
-        for message in messages { ingest(message, from: fd) }
+    private func ingest(_ messages: [WireMessage], from connection: Connection) {
+        guard state == .listening else { return }
+        for message in messages {
+            ingest(message, from: connection)
+        }
     }
 
-    private func ingest(_ message: WireMessage, from fd: Int32) {
+    private func ingest(_ message: WireMessage, from connection: Connection) {
         switch message {
         case .helloHost:
-            log.notice("[Session \(self.hostBundleID)] helloHost fd=\(fd) recording=\(!self.activeBroadcasts.isEmpty)")
-            hostFD = fd
-            let currentBroadcast = activeBroadcasts.first
-            send(.state(recording: currentBroadcast != nil,
-                        broadcast: currentBroadcast,
-                        micEnabled: micSource != nil,
-                        macOSMicAuthorized: isMacOSMicAuthorized,
-                        micEnabledByDefault: isMicEnabledByDefault),
-                 to: fd)
+            connectHost(connection)
 
-        case .helloExtension(let extensionBundleID):
-            log.notice("[Session \(self.hostBundleID)] helloExtension bundle=\(extensionBundleID) fd=\(fd) userConfirmedStart=\(self.userConfirmedStart) prevExtFD=\(self.extensionFD ?? -1)")
-            // Old fd — shutdown only; closeClientFD happens in the
-            // read-loop teardown so a recycled fd number can't be
-            // killed by a stale close.
-            if let old = extensionFD {
-                shutdown(old, SHUT_RDWR)
-            }
-            cancelReaps()
-            associateControlProcessIfKnown(fd: fd)
-            disconnectedExtensionPeerPID = nil
-            extensionFD = fd
-            if userConfirmedStart, let broadcast = pendingBroadcast {
-                send(.begin(broadcast, micDeliveryMode: micDeliveryMode), to: fd)
-            }
-            delegate?.session(self, extensionConnectedFor: extensionBundleID)
+        case let .helloExtension(extensionBundleID):
+            connectExtension(connection, bundleID: extensionBundleID)
 
-        case .userPressedStart(let micEnabled):
-            log.notice("[Session \(self.hostBundleID)] userPressedStart micEnabled=\(micEnabled) extFD=\(self.extensionFD ?? -1)")
-            armBroadcast()
-            userConfirmedStart = true
-            if let extFD = extensionFD, let broadcast = pendingBroadcast {
-                send(.begin(broadcast, micDeliveryMode: micDeliveryMode), to: extFD)
-            }
-            attachVideoSource()
-            if micEnabled {
-                attachMicSource()
-            }
+        case let .userPressedStart(micEnabled):
+            confirmStart(micEnabled: micEnabled)
 
         case .userCancelledStart:
-            log.notice("[Session \(self.hostBundleID)] userCancelledStart")
-            launchTask?.cancel()
-            launchTask = nil
-            launchGeneration = nil
-            if let extFD = extensionFD {
-                // shutdown only; closeClientFD happens in the read-loop
-                // teardown so a recycled fd number can't be killed by
-                // a stale close.
-                shutdown(extFD, SHUT_RDWR)
-                extensionFD = nil
-            }
-            pendingBroadcast = nil
-            broadcastAttemptID = nil
-            userConfirmedStart = false
-            detachMicSource()
-            detachVideoSource()
+            cancelStart()
 
         case .userPressedStop:
-            log.notice("[Session \(self.hostBundleID)] userPressedStop extFD=\(self.extensionFD ?? -1)")
-            if let extFD = extensionFD {
-                send(.finish, to: extFD)
-            }
-            detachMicSource()
-            detachVideoSource()
+            requestFinish()
 
-        case .userToggledMic(let enabled):
-            log.notice("[Session \(self.hostBundleID)] userToggledMic enabled=\(enabled)")
-            if enabled {
-                attachMicSource()
-            } else {
-                detachMicSource()
-            }
+        case let .userToggledMic(enabled):
+            log.notice("[Session \(hostBundleID)] userToggledMic enabled=\(enabled)")
+            mediaSources.setMicEnabled(enabled)
 
-        case .broadcastStarted(let broadcast):
-            if broadcastAttemptID == nil { broadcastAttemptID = UUID() }
-            activeBroadcasts.insert(broadcast)
-            delegate?.session(self, broadcastStarted: broadcast)
-            pendingBroadcast = nil
-            if let hostFD, fd != hostFD {
-                send(.broadcastStarted(broadcast), to: hostFD)
-            }
+        case let .broadcastStarted(broadcast):
+            recordStart(broadcast, from: connection)
 
-        case .broadcastEnded(let broadcast):
-            // The extension emits "ended" after its ~5s post-finish grace.
-            // stopBroadcast() and connectionEnded() may have already
-            // processed the end — re-firing the delegate and re-sending the
-            // wire envelope to the host would confuse the host's state
-            // machine (some hosts treat a late "ended" as a forced stop and
-            // disrupt the user flow as a result).
-            let wasActive = activeBroadcasts.remove(broadcast) != nil
-            pausedBroadcasts.remove(broadcast)
-            if wasActive {
-                recordBroadcastEnd(normal: true)
-                finishBroadcastAttempt()
-                delegate?.session(self, broadcastEnded: broadcast)
-                if let hostFD, fd != hostFD {
-                    send(.broadcastEnded(broadcast), to: hostFD)
-                }
-                detachMicSource()
-                detachVideoSource()
-            }
+        case let .broadcastEnded(broadcast):
+            recordEnd(broadcast, from: connection)
 
-        case .extensionTerminated(let domain, let code, let message):
-            let error = ExtensionTerminationError(
-                domain: domain, code: code, message: message
-            )
-            lastExtensionTerminationError = error
-            let processID = controlPeerPIDs[fd] ?? controlProcesses[fd]?.pid
-            if let processID {
-                extensionTerminationErrors[processID] = error
-            }
-            recordBroadcastEnd(normal: false, processID: processID)
-            if let broadcast = activeBroadcasts.first {
-                activeBroadcasts.remove(broadcast)
-                pausedBroadcasts.remove(broadcast)
-                finishBroadcastAttempt()
-                delegate?.session(self, broadcast: broadcast, terminatedWithError: error)
-                if let hostFD { send(.broadcastEnded(broadcast), to: hostFD) }
-            } else if let pending = pendingBroadcast {
-                delegate?.session(self, broadcastFailedToStart: pending, error: error)
-                if let hostFD { send(.broadcastEnded(pending), to: hostFD) }
-                pendingBroadcast = nil
-                finishBroadcastAttempt()
-            }
-            userConfirmedStart = false
-            detachMicSource()
-            detachVideoSource()
+        case let .extensionTerminated(domain, code, message):
+            recordFailure(ExtensionTerminationError(domain: domain, code: code, message: message), from: connection)
 
-        case .controlAck(let requestID):
+        case let .controlAck(requestID):
             pendingControlRequests.removeValue(forKey: requestID)?.resume()
 
-        case .state, .begin, .finish, .pause, .resume, .setMicAudioReadiness, .setMicDelivery:
+        case .begin, .finish, .pause, .resume, .setMicAudioReadiness, .setMicDelivery, .state:
             break
         }
     }
 
-    private func recordBroadcastEnd(normal: Bool, processID: pid_t? = nil) {
-        lastBroadcastEndedNormally = normal
-        if let processID = processID ?? extensionProcessID {
-            broadcastEndStates[processID] = normal
+    private func connectHost(_ connection: Connection) {
+        log.notice("[Session \(hostBundleID)] helloHost connection=\(String(describing: connection.id)) recording=\(!activeBroadcasts.isEmpty)")
+        hostConnection = connection
+        let currentBroadcast = activeBroadcasts.first
+        send(.state(recording: currentBroadcast != nil,
+                    broadcast: currentBroadcast,
+                    micEnabled: mediaSources.isMicAttached,
+                    macOSMicAuthorized: mediaSources.isMacOSMicAuthorized,
+                    micEnabledByDefault: mediaSources.isMicEnabledByDefault),
+             to: connection)
+    }
+
+    private func connectExtension(_ connection: Connection, bundleID extensionBundleID: String) {
+        log.notice("[Session \(hostBundleID)] helloExtension bundle=\(extensionBundleID) connection=\(String(describing: connection.id)) userConfirmedStart=\(userConfirmedStart) prevExtFD=\(String(describing: extensionConnection?.id))")
+        if let old = extensionConnection {
+            controlTransport?.shutdown(old.id)
         }
+        cancelReaps()
+        associateControlProcessIfKnown(connection)
+        disconnectedExtensionPeerPID = nil
+        extensionConnection = connection
+        announceProcess()
+        if userConfirmedStart, let broadcast = pendingBroadcast {
+            send(.begin(broadcast, micDeliveryMode: micDeliveryMode), to: connection)
+        }
+        delegate?.session(self, extensionConnectedFor: extensionBundleID)
+    }
+
+    private func confirmStart(micEnabled: Bool) {
+        log.notice("[Session \(hostBundleID)] userPressedStart micEnabled=\(micEnabled) extensionClient=\(String(describing: extensionConnection?.id))")
+        armBroadcast()
+        userConfirmedStart = true
+        if let extensionClient = extensionConnection, let broadcast = pendingBroadcast {
+            send(.begin(broadcast, micDeliveryMode: micDeliveryMode), to: extensionClient)
+        }
+        mediaSources.startVideo()
+        if micEnabled {
+            mediaSources.setMicEnabled(true)
+        }
+    }
+
+    private func cancelStart() {
+        endAttempt(reason: .cancelled)
+        log.notice("[Session \(hostBundleID)] userCancelledStart")
+        launchTask?.cancel()
+        launchTask = nil
+        launchGeneration = nil
+        if let extensionClient = extensionConnection {
+            controlTransport?.shutdown(extensionClient.id)
+            extensionConnection = nil
+        }
+        pendingBroadcast = nil
+        userConfirmedStart = false
+        mediaSources.setMicEnabled(false)
+        mediaSources.stopVideo()
+    }
+
+    private func requestFinish() {
+        log.notice("[Session \(hostBundleID)] userPressedStop extensionClient=\(String(describing: extensionConnection?.id))")
+        if let extensionClient = extensionConnection {
+            send(.finish, to: extensionClient)
+        }
+        mediaSources.setMicEnabled(false)
+        mediaSources.stopVideo()
+    }
+
+    private func recordStart(_ broadcast: Broadcast, from connection: Connection) {
+        if attemptState.id == nil {
+            _ = attemptState.begin(processTermination: spawnedAppex?.termination)
+        }
+        announceProcess()
+        activeBroadcasts.insert(broadcast)
+        delegate?.session(self, broadcastStarted: broadcast)
+        pendingBroadcast = nil
+        if let hostConnection, connection != hostConnection {
+            send(.broadcastStarted(broadcast), to: hostConnection)
+        }
+    }
+
+    private func recordEnd(_ broadcast: Broadcast, from connection: Connection) {
+        let wasActive = activeBroadcasts.remove(broadcast) != nil
+        pausedBroadcasts.remove(broadcast)
+        guard wasActive else { return }
+        endAttempt(reason: .finished)
+        delegate?.session(self, broadcastEnded: broadcast)
+        if let hostConnection, connection != hostConnection {
+            send(.broadcastEnded(broadcast), to: hostConnection)
+        }
+        mediaSources.setMicEnabled(false)
+        mediaSources.stopVideo()
+    }
+
+    private func recordFailure(_ error: ExtensionTerminationError, from connection: Connection) {
+        lastExtensionTerminationError = error
+        let processID = connection.peerPID ?? controlPeers[connection.id]?.process?.pid
+        endAttempt(reason: .failed(error), processID: processID)
+        if let broadcast = activeBroadcasts.first {
+            activeBroadcasts.remove(broadcast)
+            pausedBroadcasts.remove(broadcast)
+            delegate?.session(self, broadcast: broadcast, terminatedWithError: error)
+            if let hostConnection { send(.broadcastEnded(broadcast), to: hostConnection) }
+        } else if let pending = pendingBroadcast {
+            delegate?.session(self, broadcastFailedToStart: pending, error: error)
+            if let hostConnection { send(.broadcastEnded(pending), to: hostConnection) }
+            pendingBroadcast = nil
+        }
+        userConfirmedStart = false
+        mediaSources.setMicEnabled(false)
+        mediaSources.stopVideo()
+    }
+
+    @discardableResult
+    private func endAttempt(reason: BroadcastEnd.Reason, processID: Int32? = nil) -> BroadcastEnd? {
+        guard let end = attemptState.end(
+            reason: reason, processID: processID ?? extensionProcessID,
+        ) else { return nil }
+        lastBroadcastEndedNormally = reason == .finished
+        emitLifecycle(.ended(end))
+        micDeliveryMode = .normal
+        return end
+    }
+
+    private func announceProcess() {
+        guard let event = attemptState.announce(processID: extensionProcessID) else { return }
+        emitLifecycle(event)
     }
 
     private func armBroadcast() {
         guard pendingBroadcast == nil else { return }
         cancelReaps()
+        disconnectedExtensionPeerPID = nil
         lastBroadcastEndedNormally = nil
         lastExtensionTerminationError = nil
         spawnedAppex = nil
@@ -1087,39 +750,39 @@ public actor GeistBroadcastSession {
             simulatorUDID: simulator,
             hostAppBundleID: hostBundleID,
             extensionBundleID: extensionContext.bundleID,
-            startedAt: Date()
+            startedAt: Date(),
         )
         pendingBroadcast = broadcast
-        log.notice("[Session \(self.hostBundleID)] armBroadcast: spawning extension \(self.extensionContext.bundleID)")
-        let generation = UUID()
-        broadcastAttemptID = generation
-        launchGeneration = generation
-        launchTask = Task { [weak self] in await self?.launchExtension(generation: generation) }
+        log.notice("[Session \(hostBundleID)] armBroadcast: spawning extension \(extensionContext.bundleID)")
+        let attempt = attemptState.begin()
+        launchGeneration = attempt.id
+        launchTask = Task { [weak self] in await self?.launchExtension(attempt: attempt) }
     }
 
     private func pollMicAuth() async {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(2))
             if Task.isCancelled { return }
-            let current = isMacOSMicAuthorized
+            let current = mediaSources.isMacOSMicAuthorized
             if current != lastMicAuth {
                 lastMicAuth = current
                 let bundle = hostBundleID
                 log.notice("[Session \(bundle)] macOS mic auth changed → \(current)")
-                if let hostFD {
+                if let hostConnection {
                     let currentBroadcast = activeBroadcasts.first
                     send(.state(recording: currentBroadcast != nil,
                                 broadcast: currentBroadcast,
-                                micEnabled: micSource != nil,
+                                micEnabled: mediaSources.isMicAttached,
                                 macOSMicAuthorized: current,
-                                micEnabledByDefault: isMicEnabledByDefault),
-                         to: hostFD)
+                                micEnabledByDefault: mediaSources.isMicEnabledByDefault),
+                         to: hostConnection)
                 }
             }
         }
     }
 
-    private func launchExtension(generation: UUID) async {
+    private func launchExtension(attempt: BroadcastAttemptState.Attempt) async {
+        let generation = attempt.id
         do {
             guard launchGeneration == generation,
                   !Task.isCancelled,
@@ -1133,18 +796,20 @@ public actor GeistBroadcastSession {
                 stagedAppex: staged,
                 simulatorUDID: simulator,
                 simctlSetPath: simctlSetPath,
-                environment: try extensionLaunchEnv()
+                environment: extensionLaunchEnv(),
             )
+            attempt.forwardTermination(from: process.termination)
             guard launchGeneration == generation,
                   !Task.isCancelled,
-                  state == .listening else {
+                  state == .listening
+            else {
                 await spawner.terminate(process)
                 return
             }
             spawnedAppex = process
-            extensionTerminations[process.pid] = process.termination
-            for fd in controlWriters.keys {
-                associateControlProcessIfKnown(fd: fd)
+            announceProcess()
+            for peer in controlPeers.values {
+                associateControlProcessIfKnown(peer.connection)
             }
             if disconnectedExtensionPeerPID == process.pid {
                 disconnectedExtensionPeerPID = nil
@@ -1154,11 +819,14 @@ public actor GeistBroadcastSession {
         } catch {
             guard launchGeneration == generation else { return }
             log.warn("Session: launchExtension failed: \(error)")
+            let failure = error as NSError
+            endAttempt(reason: .failed(ExtensionTerminationError(
+                domain: failure.domain, code: failure.code, message: failure.localizedDescription,
+            )))
             if let pending = pendingBroadcast {
                 delegate?.session(self, broadcastFailedToStart: pending, error: error)
             }
             pendingBroadcast = nil
-            finishBroadcastAttempt()
             userConfirmedStart = false
             finishLaunch(generation: generation)
         }
@@ -1170,17 +838,12 @@ public actor GeistBroadcastSession {
         launchGeneration = nil
     }
 
-    private func finishBroadcastAttempt() {
-        broadcastAttemptID = nil
-        micDeliveryMode = .normal
-    }
-
     private func extensionLaunchEnv() throws -> [String: String] {
         var env: [String: String] = [
             "GEISTCAST_SOCKET": socketPath,
-            "GEISTCAST_HOST_SOCKET": frameSocketPath,
+            "GEISTCAST_HOST_SOCKET": frameTransport.path,
         ]
-        let dylibPaths = additionalExtensionDylibPaths + [extensionShimDylibPath].compactMap { $0 }
+        let dylibPaths = additionalExtensionDylibPaths + [extensionShimDylibPath].compactMap(\.self)
         for path in dylibPaths {
             guard FileManager.default.fileExists(atPath: path) else {
                 throw SessionError.shimDylibMissing(path)
@@ -1200,338 +863,12 @@ public actor GeistBroadcastSession {
         return env
     }
 
-    private func openFrameListenSocket() throws {
-        let listener = try Self.openUnixListener(path: frameSocketPath, backlog: 4)
-        frameListenFD = listener.fd
-        frameListenPathIdentity = listener.pathIdentity
+    private func frameTransportFailed() {
+        guard state == .listening else { return }
+        stop()
     }
 
-    private func spawnFrameAcceptLoop() {
-        let fd = frameListenFD
-        let videoQ = videoQueue
-        let micQ = micQueue
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: frameAcceptQueue)
-        source.setEventHandler { [weak self] in
-            while true {
-                let clientFD = accept(fd, nil, nil)
-                if clientFD < 0 {
-                    switch Self.acceptErrorAction(errno: errno) {
-                    case .retry:
-                        continue
-                    case .drained:
-                        return
-                    case .fail:
-                        source.cancel()
-                        Task { await self?.acceptLoopFailed(fd: fd, isFrameListener: true) }
-                        return
-                    }
-                }
-                Self.makeBlocking(clientFD)
-                var noSigPipe: Int32 = 1
-                setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE,
-                           &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-                let completed = DispatchSemaphore(value: 0)
-                Task { [weak self] in
-                    defer { completed.signal() }
-                    guard let self else {
-                        shutdown(clientFD, SHUT_RDWR)
-                        close(clientFD)
-                        return
-                    }
-                    await self.acceptFrameConnection(
-                        clientFD,
-                        videoQueue: videoQ,
-                        micQueue: micQ
-                    )
-                }
-                completed.wait()
-            }
-        }
-        source.setCancelHandler { close(fd) }
-        frameAcceptSource = source
-        source.activate()
-    }
-
-    private func acceptFrameConnection(
-        _ fd: Int32,
-        videoQueue: BoundedFrameQueue<Data>,
-        micQueue: BoundedFrameQueue<Data>
-    ) {
-        guard state == .listening else {
-            shutdown(fd, SHUT_RDWR)
-            close(fd)
-            return
-        }
-        registerClientFD(fd)
-        guard activeFrameFD == nil else {
-            if let pendingFrameFD {
-                shutdown(pendingFrameFD, SHUT_RDWR)
-                closeClientFD(pendingFrameFD)
-            }
-            pendingFrameFD = fd
-            guard let activeFrameFD else { return }
-            shutdown(activeFrameFD, SHUT_RDWR)
-            activeFrameToken?.deactivate()
-            return
-        }
-        startFrameWorker(fd: fd, videoQueue: videoQueue, micQueue: micQueue)
-    }
-
-    private func startFrameWorker(
-        fd: Int32,
-        videoQueue: BoundedFrameQueue<Data>,
-        micQueue: BoundedFrameQueue<Data>
-    ) {
-        let token = FrameWorkerToken()
-        activeFrameFD = fd
-        activeFrameToken = token
-        frameServeQueue.async { [weak self] in
-            Self.serveFrames(
-                fd: fd,
-                token: token,
-                videoQueue: videoQueue,
-                micQueue: micQueue
-            )
-            Task { [weak self] in
-                guard let self else {
-                    close(fd)
-                    return
-                }
-                await self.frameConnectionEnded(
-                    fd: fd,
-                    videoQueue: videoQueue,
-                    micQueue: micQueue
-                )
-            }
-        }
-    }
-
-    private func frameConnectionEnded(
-        fd: Int32,
-        videoQueue: BoundedFrameQueue<Data>,
-        micQueue: BoundedFrameQueue<Data>
-    ) {
-        closeClientFD(fd)
-        guard activeFrameFD == fd else { return }
-        activeFrameFD = nil
-        activeFrameToken = nil
-        guard state == .listening, let replacement = pendingFrameFD else {
-            pendingFrameFD = nil
-            return
-        }
-        pendingFrameFD = nil
-        startFrameWorker(fd: replacement, videoQueue: videoQueue, micQueue: micQueue)
-    }
-
-    nonisolated private static func serveFrames(
-        fd: Int32,
-        token: FrameWorkerToken,
-        videoQueue: BoundedFrameQueue<Data>,
-        micQueue: BoundedFrameQueue<Data>
-    ) {
-        while true {
-            guard let iteration = token.performIfActive({
-                var wroteAny = false
-                var openCount = 0
-
-                switch micQueue.dequeue(timeoutSeconds: 0) {
-                case .received(let payload):
-                    if !writeAll(fd: fd, data: payload) { return (false, 0) }
-                    wroteAny = true
-                    openCount += 1
-                case .empty:
-                    openCount += 1
-                case .closed:
-                    break
-                }
-
-                switch videoQueue.dequeue(timeoutSeconds: 0) {
-                case .received(let payload):
-                    if !writeAll(fd: fd, data: payload) { return (false, 0) }
-                    wroteAny = true
-                    openCount += 1
-                case .empty:
-                    openCount += 1
-                case .closed:
-                    break
-                }
-                return (wroteAny, openCount)
-            }) else { return }
-
-            if iteration.1 == 0 { return }
-            if !iteration.0 {
-                usleep(5_000)
-            }
-        }
-    }
-
-
-    nonisolated private static func writeAll(fd: Int32, data: Data) -> Bool {
-        data.withUnsafeBytes { ptr -> Bool in
-            guard let base = ptr.baseAddress else { return true }
-            var remaining = ptr.count
-            var off = 0
-            while remaining > 0 {
-                let n = write(fd, base.advanced(by: off), remaining)
-                if n <= 0 { return false }
-                remaining -= n
-                off += n
-            }
-            return true
-        }
-    }
-
-    private func send(_ message: WireMessage, to fd: Int32) {
-        guard let writer = controlWriters[fd] else {
-            shutdown(fd, SHUT_RDWR)
-            return
-        }
-        _ = writer.enqueue(encoder.encode(message))
-    }
-}
-
-private nonisolated(unsafe) var loggedUnsupportedAudioFormat = false
-private let loggedUnsupportedAudioFormatLock = NSLock()
-
-private func logUnsupportedAudioFormatOnce(_ format: AVAudioFormat) {
-    loggedUnsupportedAudioFormatLock.lock()
-    let alreadyLogged = loggedUnsupportedAudioFormat
-    loggedUnsupportedAudioFormat = true
-    loggedUnsupportedAudioFormatLock.unlock()
-    guard !alreadyLogged else { return }
-    log.warn("encodeAudio dropping buffers: unsupported common format \(format.commonFormat.rawValue) (sr=\(format.sampleRate) ch=\(format.channelCount))")
-}
-
-final class SessionBroadcastSink: BroadcastSink {
-    private let videoQueue: BoundedFrameQueue<Data>
-    private let micQueue: BoundedFrameQueue<Data>
-
-    init(videoQueue: BoundedFrameQueue<Data>,
-         micQueue: BoundedFrameQueue<Data>) {
-        self.videoQueue = videoQueue
-        self.micQueue = micQueue
-    }
-
-    func sendVideo(_ pixelBuffer: CVPixelBuffer) {
-        guard let payload = Self.encodeVideo(pixelBuffer) else { return }
-        _ = videoQueue.enqueueOrDropNewest(payload)
-    }
-
-    func sendMicAudio(_ samples: AVAudioPCMBuffer) {
-        guard let payload = Self.encodeAudio(samples, stream: .audioMic) else { return }
-        _ = micQueue.enqueueOrDropNewest(payload)
-    }
-
-    private static func encodeVideo(_ pixelBuffer: CVPixelBuffer) -> Data? {
-        let lockResult = CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        guard lockResult == kCVReturnSuccess else { return nil }
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        let width = UInt32(CVPixelBufferGetWidth(pixelBuffer))
-        let height = UInt32(CVPixelBufferGetHeight(pixelBuffer))
-        let fourCC = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
-
-        var payload = Data()
-        let bytesPerRowPlane0: UInt32
-        let bytesPerRowPlane1: UInt32
-
-        if planeCount == 0 {
-            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
-            let bpr: Int = CVPixelBufferGetBytesPerRow(pixelBuffer)
-            bytesPerRowPlane0 = UInt32(bpr)
-            bytesPerRowPlane1 = 0
-            payload.append(UnsafeBufferPointer(
-                start: base.assumingMemoryBound(to: UInt8.self),
-                count: bpr * Int(height)
-            ))
-        } else {
-            let bpr0: Int = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
-            let h0: Int = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
-            guard let p0 = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
-            bytesPerRowPlane0 = UInt32(bpr0)
-            payload.append(UnsafeBufferPointer(
-                start: p0.assumingMemoryBound(to: UInt8.self), count: bpr0 * h0
-            ))
-            if planeCount >= 2 {
-                let bpr1: Int = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
-                let h1: Int = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
-                guard let p1 = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) else { return nil }
-                bytesPerRowPlane1 = UInt32(bpr1)
-                payload.append(UnsafeBufferPointer(
-                    start: p1.assumingMemoryBound(to: UInt8.self), count: bpr1 * h1
-                ))
-            } else {
-                bytesPerRowPlane1 = 0
-            }
-        }
-
-        let header = FrameHeader.video(
-            pixelFormatFourCC: UInt32(fourCC),
-            width: width,
-            height: height,
-            bytesPerRowPlane0: bytesPerRowPlane0,
-            bytesPerRowPlane1: bytesPerRowPlane1,
-            payloadSize: UInt32(payload.count)
-        )
-        var out = header.encoded()
-        out.append(payload)
-        return out
-    }
-
-    private static func encodeAudio(_ buffer: AVAudioPCMBuffer, stream: StreamType) -> Data? {
-        let format = buffer.format
-        let sampleCount = UInt32(buffer.frameLength)
-        guard sampleCount > 0 else { return nil }
-
-        let wireFormat: AudioWireSampleFormat
-        let bytesPerSample: Int
-        var payload = Data()
-
-        switch format.commonFormat {
-        case .pcmFormatInt16:
-            wireFormat = .pcmInt16
-            bytesPerSample = 2
-            guard let int16 = buffer.int16ChannelData else { return nil }
-            for channelIdx in 0..<Int(format.channelCount) {
-                let channel = int16[channelIdx]
-                let bytes = Int(sampleCount) * bytesPerSample
-                payload.append(UnsafeBufferPointer(
-                    start: UnsafeRawPointer(channel).assumingMemoryBound(to: UInt8.self),
-                    count: bytes
-                ))
-            }
-        case .pcmFormatFloat32:
-            wireFormat = .pcmFloat32
-            bytesPerSample = 4
-            guard let floatData = buffer.floatChannelData else { return nil }
-            for channelIdx in 0..<Int(format.channelCount) {
-                let channel = floatData[channelIdx]
-                let bytes = Int(sampleCount) * bytesPerSample
-                payload.append(UnsafeBufferPointer(
-                    start: UnsafeRawPointer(channel).assumingMemoryBound(to: UInt8.self),
-                    count: bytes
-                ))
-            }
-        default:
-            logUnsupportedAudioFormatOnce(format)
-            return nil
-        }
-
-        // AVAudioPCMBuffer exposes per-channel pointers (planar), so what we
-        // emit on the wire is non-interleaved unless we interleave ourselves.
-        // The extension reassembles per-channel data with isInterleaved=false.
-        let header = FrameHeader.audio(
-            stream: stream,
-            sampleRate: UInt32(format.sampleRate),
-            channelCount: UInt32(format.channelCount),
-            sampleFormat: wireFormat,
-            isInterleaved: false,
-            sampleCount: sampleCount,
-            payloadSize: UInt32(payload.count)
-        )
-        var out = header.encoded()
-        out.append(payload)
-        return out
+    private func send(_ message: WireMessage, to connection: Connection) {
+        controlTransport?.send(message, to: connection.id)
     }
 }

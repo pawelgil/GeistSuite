@@ -8,6 +8,182 @@ import Testing
 
 @Suite(.serialized) struct LifecycleTests {
 
+    @Test(.timeLimit(.minutes(1)))
+    func lifecycle_CancelAndRearm_PreservesDistinctOrderedAttempts() async throws {
+        let first = PendingSpawn(processID: 101)
+        let second = PendingSpawn(processID: 102)
+        let sut = createSUT(spawner: FakeProcessSpawner(pending: [first, second]))
+        let events = await sut.lifecycleEvents()
+        let hostFD = try await startWithHost(sut)
+        defer { close(hostFD) }
+        try await startAttempt(over: hostFD, spawning: first)
+        let initial = await sut.snapshot()
+
+        try await cancelAndRearm(over: hostFD, spawning: second)
+        let replacement = await sut.snapshot()
+        await sut.stopBroadcast()
+        first.release.fire()
+        second.release.fire()
+        _ = try await first.process.termination.wait()
+        _ = try await second.process.termination.wait()
+        await sut.stop()
+
+        let ends = try await collectedEnds(events)
+        #expect(initial.attemptID != replacement.attemptID)
+        #expect(replacement.attemptSequence == initial.attemptSequence + 1)
+        #expect(ends.map(\.attemptID) == [initial.attemptID, replacement.attemptID])
+        #expect(ends.map(\.sequence) == [initial.attemptSequence, replacement.attemptSequence])
+        #expect(ends.map(\.reason) == [.cancelled, .stopped])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func lifecycle_LaunchFailsBeforePID_EmitsOneIdentifiedFailure() async throws {
+        let spawner = GatedFailingSpawner()
+        let sut = createSUT(spawner: spawner)
+        let events = await sut.lifecycleEvents()
+        let hostFD = try await startWithHost(sut)
+        defer { close(hostFD) }
+        try sendMessage(.userPressedStart(micEnabled: false), to: hostFD)
+        await spawner.entered.wait()
+        let initial = await sut.snapshot()
+
+        spawner.release.fire()
+        var iterator = events.makeAsyncIterator()
+        let end = try requireEnded(await iterator.next())
+        await sut.stop()
+
+        #expect(end.attemptID == initial.attemptID)
+        #expect(end.sequence == initial.attemptSequence)
+        #expect(end.processID == nil)
+        #expect(end.reason == .failed(ExtensionTerminationError(
+            domain: spawner.error.domain, code: spawner.error.code,
+            message: spawner.error.localizedDescription
+        )))
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func lifecycle_StaleSpawnReturns_PreservesNewAttemptAndProcess() async throws {
+        let first = PendingSpawn(processID: 101)
+        let second = PendingSpawn(processID: 102)
+        let spawner = FakeProcessSpawner(pending: [first, second])
+        let sut = createSUT(spawner: spawner)
+        let events = await sut.lifecycleEvents()
+        let hostFD = try await startWithHost(sut)
+        defer { close(hostFD) }
+        try await startAttempt(over: hostFD, spawning: first)
+        try await cancelAndRearm(over: hostFD, spawning: second)
+        second.release.fire()
+        var iterator = events.makeAsyncIterator()
+        let cancelled = try requireEnded(await iterator.next())
+        let replacement = try requireProcessStarted(await iterator.next())
+
+        first.release.fire()
+        _ = try await first.process.termination.wait()
+        let current = await sut.snapshot()
+        let end = try #require(await sut.stopBroadcast())
+        await sut.stop()
+
+        #expect(current.attemptID == replacement.attemptID)
+        #expect(current.attemptSequence == replacement.sequence)
+        #expect(cancelled.reason == .cancelled)
+        #expect(cancelled.attemptID != replacement.attemptID)
+        #expect(replacement.sequence == cancelled.sequence + 1)
+        #expect(current.processID == second.process.pid)
+        #expect(replacement.processID == second.process.pid)
+        #expect(await spawner.liveProcesses == [second.process])
+        #expect(end.attemptID == replacement.attemptID)
+        let finalEnd = try requireEnded(await iterator.next())
+        #expect(finalEnd.attemptID == replacement.attemptID)
+        #expect(finalEnd.reason == .stopped)
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test func lifecycle_MultipleSubscribers_ReceiveSameAttempt() async throws {
+        let spy = SpyDelegate()
+        let sut = createSUT(delegate: spy)
+        let first = await sut.lifecycleEvents()
+        let second = await sut.lifecycleEvents()
+        try await sut.start()
+        let fd = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
+        defer { close(fd) }
+
+        let end = try #require(await sut.stopBroadcast())
+        await sut.stop()
+
+        #expect(await endedAttempts(first) == [end.attemptID])
+        #expect(await endedAttempts(second) == [end.attemptID])
+    }
+
+    @Test func lifecycle_DisconnectBeforeSpawnCompletes_RetainsReceipt() async throws {
+        let spy = SpyDelegate()
+        let termination = ProcessTermination()
+        let spawner = GatedSpawner(processID: getpid(), termination: termination)
+        let sut = createSUT(delegate: spy, spawner: spawner)
+        let events = await sut.lifecycleEvents()
+        try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        try sendMessage(.helloHost, to: hostFD)
+        _ = try await readWireMessage(from: hostFD)
+        let extFD = try connectClient(toSocketOf: sut)
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extFD)
+        await spy.extensionConnected.wait()
+        try sendMessage(.userPressedStart(micEnabled: false), to: hostFD)
+        await spawner.spawnEntered.wait()
+
+        close(extFD)
+        let end = try #require(await firstEnd(events))
+        let receipt = try #require(end.termination)
+        termination.record(23)
+        spawner.release()
+
+        #expect(end.reason == .disconnected)
+        #expect(end.processID == getpid())
+        #expect(try await receipt.wait() == 23)
+        await sut.stop()
+    }
+
+    @Test func lifecycle_StoppedBroadcast_EmitsOneIdentifiedEnd() async throws {
+        let spy = SpyDelegate()
+        let sut = createSUT(delegate: spy)
+        let events = await sut.lifecycleEvents()
+        try await sut.start()
+        let fd = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
+        defer { close(fd) }
+        let snapshot = await sut.snapshot()
+
+        await sut.stopBroadcast()
+        await sut.stopBroadcast()
+        await sut.stop()
+
+        var ends: [BroadcastEnd] = []
+        for await event in events {
+            if case let .ended(end) = event { ends.append(end) }
+        }
+        #expect(ends.count == 1)
+        let end = try #require(ends.first)
+        #expect(end.attemptID == snapshot.attemptID)
+        #expect(end.processID == snapshot.processID)
+        #expect(end.reason == .stopped)
+    }
+
+    @Test func snapshot_RecordingBroadcast_ReturnsCoherentState() async throws {
+        let spy = SpyDelegate()
+        let sut = createSUT(delegate: spy)
+        try await sut.start()
+        let fd = try await joinAsExtensionAndStartBroadcast(sut, delegate: spy)
+        defer { close(fd) }
+
+        let snapshot = await sut.snapshot()
+
+        #expect(snapshot.lifecycle == .recording)
+        #expect(snapshot.attemptID != nil)
+        #expect(snapshot.processID != nil)
+        #expect(snapshot.micDelivery == .normal)
+        await sut.stop()
+    }
+
     @Test
     func pause_whenNoActiveBroadcast_throwsNotBroadcasting() async throws {
         let sut = createSUT()
@@ -151,6 +327,7 @@ import Testing
 
         #expect(await sut.lastBroadcastEndedNormally == true)
         #expect(await sut.micDeliveryMode == .normal)
+        #expect(await sut.snapshot().lifecycle == .idle)
         await sut.stop()
     }
 
@@ -301,6 +478,65 @@ import Testing
         await sut.stop()
     }
 
+    private func startWithHost(_ sut: GeistBroadcastSession) async throws -> Int32 {
+        try await sut.start()
+        let fd = try connectClient(toSocketOf: sut)
+        try sendMessage(.helloHost, to: fd)
+        _ = try await readWireMessage(from: fd)
+        return fd
+    }
+
+    private func startAttempt(over hostFD: Int32, spawning pending: PendingSpawn) async throws {
+        try sendMessage(.userPressedStart(micEnabled: false), to: hostFD)
+        await pending.entered.wait()
+    }
+
+    private func cancelAndRearm(over hostFD: Int32, spawning pending: PendingSpawn) async throws {
+        try sendMessage(.userCancelledStart, to: hostFD)
+        try await startAttempt(over: hostFD, spawning: pending)
+    }
+
+    private func requireEnded(_ event: BroadcastLifecycleEvent?) throws -> BroadcastEnd {
+        let event = try #require(event)
+        guard case let .ended(end) = event else {
+            throw TestError.unexpectedEvent(expected: "ended")
+        }
+        return end
+    }
+
+    private func requireProcessStarted(
+        _ event: BroadcastLifecycleEvent?
+    ) throws -> (attemptID: UUID, processID: Int32, sequence: UInt64) {
+        let event = try #require(event)
+        guard case let .processStarted(attemptID, processID, sequence) = event else {
+            throw TestError.unexpectedEvent(expected: "processStarted")
+        }
+        return (attemptID, processID, sequence)
+    }
+
+    private func collectedEnds(_ events: AsyncStream<BroadcastLifecycleEvent>) async throws -> [BroadcastEnd] {
+        var result: [BroadcastEnd] = []
+        for await event in events {
+            result.append(try requireEnded(event))
+        }
+        return result
+    }
+
+    private func endedAttempts(_ events: AsyncStream<BroadcastLifecycleEvent>) async -> [UUID] {
+        var result: [UUID] = []
+        for await event in events {
+            if case let .ended(end) = event { result.append(end.attemptID) }
+        }
+        return result
+    }
+
+    private func firstEnd(_ events: AsyncStream<BroadcastLifecycleEvent>) async -> BroadcastEnd? {
+        for await event in events {
+            if case let .ended(end) = event { return end }
+        }
+        return nil
+    }
+
     private func createSUT(
         simulator: String = "SIM-\(UUID().uuidString.prefix(8))",
         hostBundleID: String = "com.test.host",
@@ -406,6 +642,7 @@ import Testing
         case socket
         case connect(errno: Int32)
         case write
+        case unexpectedEvent(expected: String)
     }
 }
 
@@ -493,6 +730,13 @@ private final class StubSpawner: AppexSpawning {
 private final class GatedSpawner: AppexSpawning {
     private let gate = AsyncSignal()
     let spawnEntered = AsyncSignal()
+    private let processID: pid_t
+    private let termination: ProcessTermination
+
+    init(processID: pid_t = 1, termination: ProcessTermination = ProcessTermination()) {
+        self.processID = processID
+        self.termination = termination
+    }
 
     func release() { gate.fire() }
 
@@ -502,13 +746,64 @@ private final class GatedSpawner: AppexSpawning {
                environment: [String: String]) async throws -> SpawnedAppex {
         spawnEntered.fire()
         await gate.wait()
-        return SpawnedAppex(binaryPath: stagedAppex.binaryPath, generation: UUID(), pid: 1)
+        return SpawnedAppex(binaryPath: stagedAppex.binaryPath, generation: UUID(), pid: processID, termination: termination)
     }
     func killStale(stagedBinary: String) async {}
     func terminate(_ process: SpawnedAppex) async {}
 }
 
 private final class StubStagedArtifactOwner: Sendable {}
+
+private final class PendingSpawn: Sendable {
+    let entered = AsyncSignal()
+    let release = AsyncSignal()
+    let process: SpawnedAppex
+
+    init(processID: Int32) {
+        process = SpawnedAppex(binaryPath: "/tmp/fake.appex/staged/Binary", generation: UUID(), pid: processID)
+    }
+}
+
+private actor FakeProcessSpawner: AppexSpawning {
+    private var pending: [PendingSpawn]
+    private(set) var liveProcesses: [SpawnedAppex] = []
+
+    init(pending: [PendingSpawn]) {
+        self.pending = pending
+    }
+
+    func spawn(stagedAppex: StagedAppex, simulatorUDID: String,
+               simctlSetPath: String?, environment: [String: String]) async throws -> SpawnedAppex {
+        let next = pending.removeFirst()
+        next.entered.fire()
+        await next.release.wait()
+        liveProcesses.append(next.process)
+        return next.process
+    }
+
+    func killStale(stagedBinary: String) async {}
+
+    func terminate(_ process: SpawnedAppex) async {
+        liveProcesses.removeAll { $0 == process }
+        process.termination.record(0)
+    }
+}
+
+private final class GatedFailingSpawner: AppexSpawning {
+    let entered = AsyncSignal()
+    let release = AsyncSignal()
+    let error = NSError(domain: "LaunchFailure", code: 7)
+
+    func spawn(stagedAppex: StagedAppex, simulatorUDID: String,
+               simctlSetPath: String?, environment: [String: String]) async throws -> SpawnedAppex {
+        entered.fire()
+        await release.wait()
+        throw error
+    }
+
+    func killStale(stagedBinary: String) async {}
+    func terminate(_ process: SpawnedAppex) async {}
+}
 
 private final class SilentVideoProducer: VideoFrameProducer {
     func start(producing handler: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {}

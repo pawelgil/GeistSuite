@@ -554,7 +554,84 @@ import Testing
         await sut.stop()
     }
 
+    @Test
+    func setMicDelivery_ActiveExtensionDisconnects_FailsPendingControl() async throws {
+        try await withActiveBroadcast { sut, extFD in
+            async let change: Void = sut.setMicDelivery(.notReady)
+            let control = try await readWireMessage(from: extFD)
+            guard case .setMicDelivery = control else {
+                Issue.record("expected setMicDelivery, got \(control)")
+                return
+            }
+
+            shutdown(extFD, SHUT_RDWR)
+
+            do {
+                try await change
+                Issue.record("Expected disconnected control to fail")
+            } catch {
+                #expect(error as? GeistBroadcastSession.SessionError == .notConnected)
+            }
+        }
+    }
+
+    @Test
+    func setMicDelivery_SessionStops_PreservesPendingControlTimeout() async throws {
+        try await withActiveBroadcast { sut, extFD in
+            let started = ContinuousClock.now
+            async let change: Void = sut.setMicDelivery(.notReady)
+            let control = try await readWireMessage(from: extFD)
+            guard case .setMicDelivery = control else {
+                Issue.record("expected setMicDelivery, got \(control)")
+                return
+            }
+
+            await sut.stop()
+
+            do {
+                try await change
+                Issue.record("Expected unacknowledged control to time out")
+            } catch {
+                #expect(error as? GeistBroadcastSession.SessionError == .controlTimedOut)
+                #expect(started.duration(to: .now) >= .seconds(5))
+            }
+        }
+    }
+
     // MARK: helpers
+
+    private func withActiveBroadcast(
+        _ body: (GeistBroadcastSession, Int32) async throws -> Void
+    ) async throws {
+        let connected = AsyncSignal()
+        let started = AsyncSignal()
+        let delegate = SignalingDelegate(
+            extensionConnected: connected, broadcastStarted: started
+        )
+        let sut = createSUT(delegate: delegate)
+        try await sut.start()
+        let hostFD = try connectClient(toSocketOf: sut)
+        defer { close(hostFD) }
+        let extFD = try connectClient(toSocketOf: sut)
+        defer { close(extFD) }
+        do {
+            try await driveUserPressedStart(
+                sut: sut, hostFD: hostFD, extFD: extFD,
+                extensionConnected: connected, micEnabled: false
+            )
+            let broadcast = Broadcast(
+                simulatorUDID: sut.simulator, hostAppBundleID: sut.hostBundleID,
+                extensionBundleID: "com.test.host.cast", startedAt: Date()
+            )
+            try sendMessage(.broadcastStarted(broadcast), to: extFD)
+            await started.wait()
+            try await body(sut, extFD)
+        } catch {
+            await sut.stop()
+            throw error
+        }
+        await sut.stop()
+    }
 
     private func createSUT(
         simulator: String = "SIM-\(UUID().uuidString.prefix(8))",

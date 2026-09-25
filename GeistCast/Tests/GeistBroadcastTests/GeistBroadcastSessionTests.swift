@@ -8,21 +8,6 @@ import Testing
 
 @Suite(.serialized) struct GeistBroadcastSessionTests {
 
-    @Test(arguments: [EAGAIN, EWOULDBLOCK])
-    func acceptErrorAction_WhenListenerIsDrained_ReturnsDrained(error: Int32) {
-        #expect(GeistBroadcastSession.acceptErrorAction(errno: error) == .drained)
-    }
-
-    @Test
-    func acceptErrorAction_WhenReadIsInterrupted_ReturnsRetry() {
-        #expect(GeistBroadcastSession.acceptErrorAction(errno: EINTR) == .retry)
-    }
-
-    @Test
-    func acceptErrorAction_WhenSocketPermanentlyFails_ReturnsFail() {
-        #expect(GeistBroadcastSession.acceptErrorAction(errno: EBADF) == .fail)
-    }
-
     @Test
     func socketPath_differentSimulators_yieldDifferentPaths() {
         let sutA = createSUT(simulator: "S1", hostBundleID: "com.b")
@@ -72,6 +57,34 @@ import Testing
         var isDirectory: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: framePath, isDirectory: &isDirectory))
         #expect(isDirectory.boolValue)
+        await sut.stop()
+    }
+
+    @Test
+    func start_AfterFrameBindFailure_CanRetryAfterRemovingBlocker() async throws {
+        let simulator = "SIM-\(UUID().uuidString.prefix(8))"
+        let framePath = "/tmp/geistcast-frames-\(simulator)-com.test.host.sock"
+        try FileManager.default.createDirectory(atPath: framePath, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(atPath: framePath) }
+        let sut = createSUT(simulator: simulator)
+        await #expect(throws: GeistBroadcastSession.SessionError.bind(errno: EADDRINUSE)) {
+            try await sut.start()
+        }
+
+        try FileManager.default.removeItem(atPath: framePath)
+        try await sut.start()
+
+        #expect(await sut.state == .listening)
+        let control = try connectClient(toSocketOf: sut)
+        let frames = try connectClient(toSocketPath: framePath)
+        defer { close(control); close(frames) }
+        try sendMessage(.helloHost, to: control)
+        let reply = try await readWireMessage(from: control)
+        switch reply {
+        case .state(recording: false, broadcast: nil, micEnabled: false, macOSMicAuthorized: _, micEnabledByDefault: _):
+            break
+        default: Issue.record("Expected idle host state after retry, got \(reply)")
+        }
         await sut.stop()
     }
 
@@ -367,20 +380,21 @@ import Testing
         let delegate = SpyDelegate()
         let spawner = GatedTerminationSpawner()
         let sut = createSUT(delegate: delegate, spawner: spawner)
+        var events = await sut.lifecycleEvents().makeAsyncIterator()
         try await sut.start()
         let hostFD = try connectClient(toSocketOf: sut)
         defer { close(hostFD) }
         try sendMessage(.userPressedStart(micEnabled: false), to: hostFD)
-        #expect(await waitUntil { spawner.liveProcesses.count == 1 })
+        let original = try requireProcessStarted(await events.next())
 
         let disconnectedFD = try connectClient(toSocketOf: sut)
         try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: disconnectedFD)
-        #expect(await waitUntil { delegate.extensionConnectionCount == 1 })
+        await delegate.extensionConnected.wait()
         try sendMessage(.broadcastStarted(makeBroadcast()), to: disconnectedFD)
         await delegate.broadcastStarted.wait()
 
         try sendMessage(.userPressedStart(micEnabled: false), to: hostFD)
-        #expect(await waitUntil { spawner.liveProcesses.count == 2 })
+        let replacement = try requireProcessStarted(await events.next())
         let freshProcess = spawner.liveProcesses.last
         close(disconnectedFD)
         await spawner.terminateEntered.wait()
@@ -390,6 +404,8 @@ import Testing
 
         #expect(spawner.liveProcesses.count == 1)
         #expect(spawner.liveProcesses.first == freshProcess)
+        #expect(replacement.attemptID != original.attemptID)
+        #expect(replacement.sequence == original.sequence + 1)
         await sut.stop()
     }
 
@@ -406,12 +422,43 @@ import Testing
 
         let extensionFD = try connectClient(toSocketOf: sut)
         try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extensionFD)
-        #expect(await waitUntil { delegate.extensionConnectionCount == 1 })
+        await delegate.extensionConnected.wait()
         close(extensionFD)
         spawner.releaseSpawn()
         await spawner.terminateCalled.wait()
 
         #expect(spawner.terminatedProcess == spawner.process)
+        await sut.stop()
+    }
+
+    @Test
+    func extensionDisconnect_RearmWithReusedPID_DoesNotReapNewProcess() async throws {
+        let delegate = SpyDelegate()
+        let spawner = FakeReusedPIDSpawner()
+        let sut = createSUT(delegate: delegate, spawner: spawner)
+        var events = await sut.lifecycleEvents().makeAsyncIterator()
+        try await sut.start()
+        let host = try connectClient(toSocketOf: sut)
+        defer { close(host); spawner.releaseFirstSpawn.fire() }
+        try sendMessage(.userPressedStart(micEnabled: false), to: host)
+        await spawner.firstSpawnEntered.wait()
+        let extensionPeer = try connectClient(toSocketOf: sut)
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: extensionPeer)
+        let original = try requireProcessStarted(await events.next())
+        close(extensionPeer)
+        let disconnected = try requireEnded(await events.next())
+
+        try sendMessage(.userPressedStart(micEnabled: false), to: host)
+        let replacement = try requireProcessStarted(await events.next())
+        let observation = await observeReapGrace(of: spawner.replacement)
+
+        #expect(disconnected.attemptID == original.attemptID)
+        #expect(disconnected.reason == .disconnected)
+        #expect(replacement.attemptID != original.attemptID)
+        #expect(observation == .deadline)
+        #expect(await spawner.liveProcesses == [spawner.replacement])
+        spawner.releaseFirstSpawn.fire()
+        _ = try await spawner.original.termination.wait()
         await sut.stop()
     }
 
@@ -538,6 +585,39 @@ import Testing
         #expect(await sut.hasInFlightBroadcast == false)
 
         await sut.stop()
+    }
+
+    private func requireProcessStarted(
+        _ event: BroadcastLifecycleEvent?
+    ) throws -> (attemptID: UUID, sequence: UInt64) {
+        let event = try #require(event)
+        guard case let .processStarted(attemptID, _, sequence) = event else {
+            throw TestError.unexpectedEvent
+        }
+        return (attemptID, sequence)
+    }
+
+    private func requireEnded(_ event: BroadcastLifecycleEvent?) throws -> BroadcastEnd {
+        let event = try #require(event)
+        guard case let .ended(end) = event else { throw TestError.unexpectedEvent }
+        return end
+    }
+
+    private func observeReapGrace(of process: SpawnedAppex) async -> ReapObservation {
+        await withTaskGroup(of: ReapObservation.self) { group in
+            group.addTask {
+                do { return .terminated(try await process.termination.wait()) }
+                catch { return .cancelled }
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                    return .deadline
+                } catch { return .cancelled }
+            }
+            defer { group.cancelAll() }
+            return await group.next() ?? .cancelled
+        }
     }
 
     private func createSUT(
@@ -697,6 +777,7 @@ import Testing
         case socket
         case connect(errno: Int32)
         case write
+        case unexpectedEvent
     }
 }
 
@@ -736,6 +817,40 @@ private final class SpyDelegate: GeistBroadcastSessionDelegate, @unchecked Senda
                  error: Error) {
         lock.withLock { _failures.append(broadcast) }
         self.broadcastFailedToStart.fire()
+    }
+}
+
+private enum ReapObservation: Equatable {
+    case terminated(Int32)
+    case deadline
+    case cancelled
+}
+
+private actor FakeReusedPIDSpawner: AppexSpawning {
+    let firstSpawnEntered = AsyncSignal()
+    let releaseFirstSpawn = AsyncSignal()
+    let original = SpawnedAppex(binaryPath: "/tmp/original", generation: UUID(), pid: getpid())
+    let replacement = SpawnedAppex(binaryPath: "/tmp/replacement", generation: UUID(), pid: getpid())
+    private var spawnCount = 0
+    private(set) var liveProcesses: [SpawnedAppex] = []
+
+    func spawn(stagedAppex: StagedAppex, simulatorUDID: String,
+               simctlSetPath: String?, environment: [String: String]) async throws -> SpawnedAppex {
+        spawnCount += 1
+        let process = spawnCount == 1 ? original : replacement
+        if process == original {
+            firstSpawnEntered.fire()
+            await releaseFirstSpawn.wait()
+        }
+        liveProcesses.append(process)
+        return process
+    }
+
+    func killStale(stagedBinary: String) async {}
+
+    func terminate(_ process: SpawnedAppex) async {
+        liveProcesses.removeAll { $0 == process }
+        process.termination.record(0)
     }
 }
 

@@ -45,14 +45,6 @@ struct SpawnedAppex: Hashable, Sendable {
     }
 }
 
-final class ProcessTermination: Sendable {
-    private let status = Mutex<Int32?>(nil)
-
-    var value: Int32? { status.withLock { $0 } }
-
-    func record(_ value: Int32) { status.withLock { $0 = value } }
-}
-
 struct ProcessBirthIdentity: Hashable, Sendable {
     let seconds: UInt64
     let microseconds: UInt64

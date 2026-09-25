@@ -248,8 +248,8 @@ void GC_StartLifecycleDriver(void) {
             }
             if ([type isEqual:@"set_mic_delivery"]) {
                 NSString *mode = msg[@"mode"] ?: @"normal";
-                GC_LOG("received set_mic_delivery mode=%{public}@", mode);
                 GC_SetMicDeliveryMode(mode);
+                GC_LOG("applied set_mic_delivery mode=%{public}@", mode);
                 GC_WriteControlLine(ControlAckLine(msg[@"requestID"]));
                 continue;
             }
