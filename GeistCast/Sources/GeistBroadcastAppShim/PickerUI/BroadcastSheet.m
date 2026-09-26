@@ -271,6 +271,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
     UIView *footer = [[UIView alloc] init];
 
     [_actionButton setTitle:@"Start Recording"];
+    _actionButton.accessibilityIdentifier = @"geistcast.recordingAction";
     _actionButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_actionButton addTarget:self action:@selector(actionLabelTapped)
             forControlEvents:UIControlEventTouchUpInside];
@@ -321,6 +322,8 @@ static UIWindow *gBroadcastSheetWindow = nil;
 }
 
 - (void)installMicToggle {
+    _micButton.accessibilityIdentifier = @"geistcast.microphone";
+    _micButton.accessibilityLabel = @"Microphone";
     _micButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_micButton addTarget:self action:@selector(micTapped)
          forControlEvents:UIControlEventTouchUpInside];
@@ -330,6 +333,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
 
     UILabel *micTitle = [[UILabel alloc] init];
     micTitle.text = @"Microphone";
+    micTitle.isAccessibilityElement = NO;
     micTitle.textColor = [UIColor whiteColor];
     micTitle.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     micTitle.textAlignment = NSTextAlignmentCenter;
@@ -337,6 +341,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
     [self.view addSubview:micTitle];
 
     _micStateLabel.textAlignment = NSTextAlignmentCenter;
+    _micStateLabel.isAccessibilityElement = NO;
     _micStateLabel.translatesAutoresizingMaskIntoConstraints = NO;
     _micStateLabel.clipsToBounds = YES;
     [self.view addSubview:_micStateLabel];
@@ -371,7 +376,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
         [UIImageSymbolConfiguration configurationWithPointSize:24 weight:UIImageSymbolWeightRegular];
     _micButton.iconView.image = [UIImage systemImageNamed:(micAuth ? @"mic" : @"mic.slash")
                                        withConfiguration:symConfig];
-    _micButton.enabled = micAuth;
+    _micButton.enabled = micAuth && !_isStarting;
     _micButton.alpha = micAuth ? 1.0 : 0.4;
     _micButton.isOn = micAuth && _micEnabled;
 
@@ -390,6 +395,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
         _micStateLabel.layer.cornerRadius = 10;
         _micStateLabel.textInsets = UIEdgeInsetsMake(6, 14, 6, 14);
     }
+    _micButton.accessibilityHint = micAuth ? nil : _micStateLabel.text;
     [_micStateLabel invalidateIntrinsicContentSize];
 }
 
@@ -459,6 +465,8 @@ static UIWindow *gBroadcastSheetWindow = nil;
     else if (_recording) title = @"Stop Recording";
     else title = @"Start Recording";
     [_actionButton setTitle:title];
+    _actionButton.enabled = !_isStarting;
+    [self applyMicAuthState];
 }
 
 - (void)backdropTapped {

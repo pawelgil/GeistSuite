@@ -20,6 +20,7 @@ Folder names and module names are intentionally different: folders are `GeistCor
 - Apps: `cd <product>/App/ && xcodegen generate && xcodebuild -project <App>.xcodeproj -scheme <App> -configuration Debug -derivedDataPath build CODE_SIGNING_ALLOWED=NO build`.
 - `xcodegen` is the source of truth for the Xcode project files. Never edit `*.xcodeproj/project.pbxproj` directly. Regenerate via `xcodegen generate` after touching anything under `<product>/App/Sources/`.
 - `swift test` must finish under 1 minute. Anything longer is a hanging test, not a slow one — find it.
+- `scripts/verify.sh` also runs the hosted UIKit picker accessibility tests on Mac Catalyst. Their XcodeGen project lives in `GeistCast/Tests/PickerAccessibility/`; SwiftPM does not discover them.
 
 ## Logging
 

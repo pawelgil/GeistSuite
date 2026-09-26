@@ -25,6 +25,16 @@ swift build || fail "swift build"
 step "swift test --no-parallel (148 tests, ~4s)"
 swift test --no-parallel || fail "swift test"
 
+step "picker accessibility tests (Mac Catalyst)"
+( cd GeistCast/Tests/PickerAccessibility && xcodegen generate ) || fail "xcodegen PickerAccessibility"
+xcodebuild test \
+    -project GeistCast/Tests/PickerAccessibility/PickerAccessibility.xcodeproj \
+    -scheme PickerAccessibility \
+    -destination 'platform=macOS,variant=Mac Catalyst' \
+    -derivedDataPath /tmp/geist-picker-accessibility-dd \
+    CODE_SIGNING_ALLOWED=NO \
+    | tail -10 || fail "PickerAccessibility tests"
+
 step "xcodegen generate (GeistCast)"
 ( cd GeistCast/App && xcodegen generate ) || fail "xcodegen GeistCast"
 

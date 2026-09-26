@@ -9,11 +9,13 @@
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
+        self.isAccessibilityElement = YES;
         _label = [[UILabel alloc] init];
         _label.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
         _label.textColor = [UIColor whiteColor];
         _label.textAlignment = NSTextAlignmentCenter;
         _label.userInteractionEnabled = NO;
+        _label.isAccessibilityElement = NO;
         _label.translatesAutoresizingMaskIntoConstraints = NO;
         [self addSubview:_label];
         [NSLayoutConstraint activateConstraints:@[
@@ -26,7 +28,20 @@
     return self;
 }
 
-- (void)setTitle:(NSString *)title { _label.text = title; }
+- (void)setTitle:(NSString *)title {
+    _label.text = title;
+    self.accessibilityLabel = title;
+}
+
+- (UIAccessibilityTraits)accessibilityTraits {
+    return UIAccessibilityTraitButton | (self.enabled ? 0 : UIAccessibilityTraitNotEnabled);
+}
+
+- (BOOL)accessibilityActivate {
+    if (!self.enabled) return NO;
+    [self sendActionsForControlEvents:UIControlEventTouchUpInside];
+    return YES;
+}
 
 - (void)setHighlighted:(BOOL)highlighted {
     [super setHighlighted:highlighted];
@@ -46,6 +61,7 @@
 
 - (instancetype)initWithSize:(CGFloat)size {
     if ((self = [super initWithFrame:CGRectZero])) {
+        self.isAccessibilityElement = YES;
         UIVisualEffect *effect;
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
         if (HostSupportsGlassEffect()) {
@@ -99,6 +115,20 @@
     _isOn = isOn;
     [self refreshBackground];
     _iconView.tintColor = isOn ? _onTint : _offTint;
+}
+
+- (UIAccessibilityTraits)accessibilityTraits {
+    return UIAccessibilityTraitButton | (self.enabled ? 0 : UIAccessibilityTraitNotEnabled);
+}
+
+- (NSString *)accessibilityValue {
+    return self.isOn ? @"On" : @"Off";
+}
+
+- (BOOL)accessibilityActivate {
+    if (!self.enabled) return NO;
+    [self sendActionsForControlEvents:UIControlEventTouchUpInside];
+    return YES;
 }
 
 - (void)refreshBackground {
