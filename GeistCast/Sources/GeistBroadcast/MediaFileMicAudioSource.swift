@@ -3,33 +3,44 @@ import CoreMedia
 import Foundation
 import Synchronization
 
-// Loops the file so a short clip keeps producing audio for the full
-// length of the broadcast.
 final class MediaFileMicAudioSource: BroadcastSource {
+    // MARK: Nested Types
+
+    private struct PlaybackClock {
+        // MARK: Properties
+
+        private var start: UInt64?
+        private var deliveredFrames: Int64 = 0
+
+        // MARK: Functions
+
+        mutating func deadline(for buffer: AVAudioPCMBuffer) -> UInt64 {
+            let anchor = start ?? DispatchTime.now().uptimeNanoseconds
+            start = anchor
+            let elapsed = Double(deliveredFrames) / buffer.format.sampleRate
+            deliveredFrames += Int64(buffer.frameLength)
+            return anchor + UInt64(elapsed * 1_000_000_000)
+        }
+    }
+
+    // MARK: Properties
+
     private let url: URL
+    private let sleepNanoseconds: @Sendable (UInt64) async throws -> Void
     private let task = Mutex<Task<Void, Never>?>(nil)
 
-    init(url: URL) {
+    // MARK: Lifecycle
+
+    init(url: URL, sleepNanoseconds: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }) {
         self.url = url
+        self.sleepNanoseconds = sleepNanoseconds
     }
 
-    func start(into sink: any BroadcastSink) throws {
-        stop()
-        let url = self.url
-        let new = Task.detached(priority: .userInitiated) { [sink] in
-            while !Task.isCancelled {
-                let completed = await Self.runOneCycle(url: url, sink: sink)
-                if !completed { return }
-            }
-        }
-        task.withLock { $0 = new }
-    }
+    // MARK: Static Functions
 
-    func stop() {
-        task.withLock { $0?.cancel(); $0 = nil }
-    }
-
-    private static func runOneCycle(url: URL, sink: any BroadcastSink) async -> Bool {
+    private static func runOneCycle(url: URL, sink: any BroadcastSink, clock: inout PlaybackClock,
+                                    sleepNanoseconds: @Sendable (UInt64) async throws -> Void) async -> Bool
+    {
         let asset = AVURLAsset(url: url)
         guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else {
             return false
@@ -51,22 +62,18 @@ final class MediaFileMicAudioSource: BroadcastSource {
         let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: settings)
         reader.add(output)
         guard reader.startReading() else { return false }
+        defer { reader.cancelReading() }
 
-        let streamStartHost = DispatchTime.now().uptimeNanoseconds
-        var deliveredSampleFrames: Int64 = 0
         while !Task.isCancelled, reader.status == .reading {
             guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
             guard let buffer = Self.pcmBuffer(from: sampleBuffer, format: format) else { continue }
-            // Pace delivery to the audio's native sample rate so the
-            // receiver gets buffers at real-time cadence.
-            let targetHost = streamStartHost
-                + UInt64(Double(deliveredSampleFrames) / format.sampleRate * 1_000_000_000)
+            let targetHost = clock.deadline(for: buffer)
             let now = DispatchTime.now().uptimeNanoseconds
             if targetHost > now {
-                try? await Task.sleep(nanoseconds: targetHost - now)
+                try? await sleepNanoseconds(targetHost - now)
             }
+            guard !Task.isCancelled else { return false }
             sink.sendMicAudio(buffer)
-            deliveredSampleFrames += Int64(buffer.frameLength)
         }
         return reader.status == .completed
     }
@@ -90,5 +97,26 @@ final class MediaFileMicAudioSource: BroadcastSource {
         ) == kCMBlockBufferNoErr, let src = dataPointer else { return nil }
         memcpy(dst[0], src, min(byteCount, totalLength))
         return buffer
+    }
+
+    // MARK: Functions
+
+    func start(into sink: any BroadcastSink) throws {
+        stop()
+        let url = self.url
+        let sleepNanoseconds = self.sleepNanoseconds
+        // The source owns cancellation; reader and playback clock stay within this task.
+        let new = Task.detached(priority: .userInitiated) { [sink] in
+            var clock = PlaybackClock()
+            while !Task.isCancelled {
+                let completed = await Self.runOneCycle(url: url, sink: sink, clock: &clock, sleepNanoseconds: sleepNanoseconds)
+                if !completed { return }
+            }
+        }
+        task.withLock { $0 = new }
+    }
+
+    func stop() {
+        task.withLock { $0?.cancel(); $0 = nil }
     }
 }
