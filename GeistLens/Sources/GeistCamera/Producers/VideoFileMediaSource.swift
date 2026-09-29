@@ -3,33 +3,35 @@ import CoreMedia
 import CoreVideo
 import Dispatch
 import Foundation
-import Synchronization
 import GeistKit
+import Synchronization
 
 public enum VideoFileMediaSourceError: Error {
     case noVideoTrack
 }
 
-private final class ResumePositionNs: Sendable {
-    let value = Atomic<Int64>(0)
-}
+public final class VideoFileMediaSource: MediaSource {
+    // MARK: Nested Types
 
-/// Single-task A/V source for a local media file. One `AVAssetReader` with
-/// both video and audio outputs, paced against one host clock, anchored at the
-/// first sample's PTS from either track. Loops automatically; cycle offset =
-/// `asset.duration` (shared between tracks → no per-track drift).
-public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
+    private final class ResumePosition: Sendable {
+        let time = Mutex<CMTime>(.zero)
+    }
+
+    // MARK: Properties
+
     public let hasVideo: Bool = true
     public let hasAudio: Bool
     public let declaredVideoFormat: VideoSlotFormat?
     public let declaredAudioFormat: AudioSlotFormat?
 
     private let url: URL
-    private let assetDurationNs: Int64
+    private let assetDuration: CMTime
     private let task = Mutex<Task<Void, Never>?>(nil)
     private let activeSink = Mutex<(any MediaSink)?>(nil)
     private let targetVideoFormat: Mutex<VideoSlotFormat>
-    private let resume = ResumePositionNs()
+    private let resume = ResumePosition()
+
+    // MARK: Lifecycle
 
     public init(url: URL) throws {
         self.url = url
@@ -45,98 +47,54 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
             pixelFormat: .yuv420FullRange,
             fps: fpsRaw > 0 ? Int(fpsRaw.rounded()) : 30
         )
-        self.declaredVideoFormat = declaredVideo
-        self.targetVideoFormat = Mutex(declaredVideo)
+        declaredVideoFormat = declaredVideo
+        targetVideoFormat = Mutex(declaredVideo)
         let audioTracks = asset.tracks(withMediaType: .audio)
-        self.hasAudio = !audioTracks.isEmpty
-        self.declaredAudioFormat = audioTracks.isEmpty ? nil : AudioSlotFormat(sampleRate: 48000, channels: 1)
-        self.assetDurationNs = Self.ptsToNanoseconds(asset.duration)
+        hasAudio = !audioTracks.isEmpty
+        declaredAudioFormat = audioTracks.isEmpty ? nil : AudioSlotFormat(sampleRate: 48000, channels: 1)
+        assetDuration = asset.duration
     }
 
-    public func start(into sink: any MediaSink) throws {
-        activeSink.withLock { $0 = sink }
-        launchTask()
-    }
+    // MARK: Static Functions
 
-    public func stop() {
-        task.withLock { $0?.cancel(); $0 = nil }
-        activeSink.withLock { $0 = nil }
-    }
-
-    public func reformat(to target: VideoSlotFormat) {
-        let changed = targetVideoFormat.withLock { old -> Bool in
-            let same = (old.width == target.width
-                        && old.height == target.height
-                        && old.pixelFormat == target.pixelFormat)
-            if !same { old = target }
-            return !same
-        }
-        guard changed else { return }
-        task.withLock { $0?.cancel(); $0 = nil }
-        if activeSink.withLock({ $0 != nil }) {
-            launchTask()
-        }
-    }
-
-    private func launchTask() {
-        guard let sink = activeSink.withLock({ $0 }) else { return }
-        let url = self.url
-        let resume = self.resume
-        let snapshot = targetVideoFormat.withLock { $0 }
-        let startNs = resume.value.load(ordering: .relaxed)
-        let assetDurationNs = self.assetDurationNs
-        let new = Task.detached(priority: .userInitiated) { [sink, resume] in
-            await Self.run(url: url,
-                            startAtNs: startNs,
-                            assetDurationNs: assetDurationNs,
-                            targetVideoFormat: snapshot,
-                            sink: sink,
-                            resume: resume)
-        }
-        task.withLock { $0 = new }
-    }
-
-    static func ptsToNanoseconds(_ t: CMTime) -> Int64 {
+    private static func ptsToNanoseconds(_ t: CMTime) -> Int64 {
         guard t.isValid else { return 0 }
         let scaled = CMTimeConvertScale(t, timescale: 1_000_000_000, method: .default)
         return scaled.value
     }
 
     private static func run(url: URL,
-                             startAtNs: Int64,
-                             assetDurationNs: Int64,
-                             targetVideoFormat: VideoSlotFormat,
-                             sink: any MediaSink,
-                             resume: ResumePositionNs) async {
+                            startAt: CMTime,
+                            assetDuration: CMTime,
+                            targetVideoFormat: VideoSlotFormat,
+                            sink: any MediaSink,
+                            resume: ResumePosition) async
+    {
         let asset = AVURLAsset(url: url)
-        // One host-clock anchor per stream so emitted PTS is mach-time-based
-        // and stays monotonic across cycle wraps — matching what mac cam/mic
-        // emit, so AVAssetWriter's session anchor handles both consistently.
-        let streamHostT0 = DispatchTime.now().uptimeNanoseconds
-        var firstCycleStart = startAtNs
-        var cycleOffsetNs: Int64 = 0
+        let hostStart = CMClockGetTime(CMClockGetHostTimeClock())
+        var timeline = LoopingMediaTimeline(start: hostStart, cycleDuration: assetDuration)
+        var cycleStart = startAt
         while !Task.isCancelled {
             let completed = await runOneCycle(asset: asset,
-                                               startAtNs: firstCycleStart,
-                                               cycleOffsetNs: cycleOffsetNs,
-                                               streamHostT0: streamHostT0,
-                                               targetVideoFormat: targetVideoFormat,
-                                               sink: sink,
-                                               resume: resume)
-            firstCycleStart = 0
-            cycleOffsetNs &+= assetDurationNs
+                                              startAt: cycleStart,
+                                              timeline: &timeline,
+                                              targetVideoFormat: targetVideoFormat,
+                                              sink: sink,
+                                              resume: resume)
             if !completed { break }
+            cycleStart = .zero
+            timeline.advanceCycle()
         }
         log.notice("VideoFileMediaSource ended for \(url.lastPathComponent)")
     }
 
     private static func runOneCycle(asset: AVURLAsset,
-                                     startAtNs: Int64,
-                                     cycleOffsetNs: Int64,
-                                     streamHostT0: UInt64,
-                                     targetVideoFormat: VideoSlotFormat,
-                                     sink: any MediaSink,
-                                     resume: ResumePositionNs) async -> Bool {
+                                    startAt: CMTime,
+                                    timeline: inout LoopingMediaTimeline,
+                                    targetVideoFormat: VideoSlotFormat,
+                                    sink: any MediaSink,
+                                    resume: ResumePosition) async -> Bool
+    {
         let videoTracks = asset.tracks(withMediaType: .video)
         let audioTracks = asset.tracks(withMediaType: .audio)
         guard let videoTrack = videoTracks.first else {
@@ -168,9 +126,9 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
             log.warn("VideoFileMediaSource: AVAssetReader init failed: \(error)")
             return false
         }
-        if startAtNs > 0 {
+        if startAt > .zero {
             reader.timeRange = CMTimeRange(
-                start: CMTime(value: startAtNs, timescale: 1_000_000_000),
+                start: startAt,
                 duration: CMTime.positiveInfinity
             )
         }
@@ -203,7 +161,6 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
             return false
         }
 
-        var anchorPTSNs: Int64 = -1
         var pendingVideo: CMSampleBuffer? = nil
         var pendingAudio: CMSampleBuffer? = nil
 
@@ -229,25 +186,18 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
             }
             let sb = pickVideo ? pendingVideo! : pendingAudio!
 
-            let rawPtsNs = ptsToNanoseconds(CMSampleBufferGetPresentationTimeStamp(sb))
-            if anchorPTSNs < 0 { anchorPTSNs = rawPtsNs }
-
-            let totalElapsedNs = (rawPtsNs - anchorPTSNs) + cycleOffsetNs
-            let targetHost = streamHostT0 &+ UInt64(max(0, totalElapsedNs))
+            let sourceTime = CMSampleBufferGetPresentationTimeStamp(sb)
+            let adjustedPts = timeline.presentationTime(for: sourceTime)
+            let targetHost = UInt64(max(0, ptsToNanoseconds(adjustedPts)))
             let now = DispatchTime.now().uptimeNanoseconds
             if targetHost > now {
                 try? await Task.sleep(nanoseconds: targetHost - now)
-                if Task.isCancelled { break }
             }
-
-            // PTS in mach-time scale — same as mac cam/mic — so AVAssetWriter's
-            // session anchor lines up audio and video tracks correctly.
-            let adjustedPtsNs = Int64(bitPattern: streamHostT0) &+ totalElapsedNs
-            let adjustedPts = CMTime(value: adjustedPtsNs, timescale: 1_000_000_000)
+            if Task.isCancelled { break }
             let dur = CMSampleBufferGetDuration(sb)
 
             if pickVideo {
-                resume.value.store(rawPtsNs, ordering: .relaxed)
+                resume.time.withLock { $0 = sourceTime }
                 if let pb = CMSampleBufferGetImageBuffer(sb) {
                     sink.sendVideo(pb, pts: adjustedPts, duration: dur)
                 }
@@ -266,7 +216,8 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
 
     private static func audioPCMBuffer(from sb: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sb),
-              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
+        else {
             return nil
         }
         var asbd = asbdPtr.pointee
@@ -274,7 +225,8 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
 
         let frames = CMSampleBufferGetNumSamples(sb)
         guard frames > 0,
-              let pcm = AVAudioPCMBuffer(pcmFormat: avFormat, frameCapacity: AVAudioFrameCount(frames)) else {
+              let pcm = AVAudioPCMBuffer(pcmFormat: avFormat, frameCapacity: AVAudioFrameCount(frames))
+        else {
             return nil
         }
         pcm.frameLength = AVAudioFrameCount(frames)
@@ -284,14 +236,60 @@ public final class VideoFileMediaSource: MediaSource, @unchecked Sendable {
         var totalLength = 0
         var dataPointer: UnsafeMutablePointer<Int8>?
         let status = CMBlockBufferGetDataPointer(blockBuffer,
-                                                  atOffset: 0,
-                                                  lengthAtOffsetOut: &lengthAtOffset,
-                                                  totalLengthOut: &totalLength,
-                                                  dataPointerOut: &dataPointer)
+                                                 atOffset: 0,
+                                                 lengthAtOffsetOut: &lengthAtOffset,
+                                                 totalLengthOut: &totalLength,
+                                                 dataPointerOut: &dataPointer)
         guard status == noErr, let dataPointer, let dst = pcm.floatChannelData?[0] else {
             return nil
         }
         memcpy(dst, dataPointer, totalLength)
         return pcm
+    }
+
+    // MARK: Functions
+
+    public func start(into sink: any MediaSink) throws {
+        activeSink.withLock { $0 = sink }
+        launchTask()
+    }
+
+    public func stop() {
+        task.withLock { $0?.cancel(); $0 = nil }
+        activeSink.withLock { $0 = nil }
+    }
+
+    public func reformat(to target: VideoSlotFormat) {
+        let changed = targetVideoFormat.withLock { old -> Bool in
+            let same = (old.width == target.width
+                && old.height == target.height
+                && old.pixelFormat == target.pixelFormat)
+            if !same { old = target }
+            return !same
+        }
+        guard changed else { return }
+        task.withLock { $0?.cancel(); $0 = nil }
+        if activeSink.withLock({ $0 != nil }) {
+            launchTask()
+        }
+    }
+
+    private func launchTask() {
+        guard let sink = activeSink.withLock({ $0 }) else { return }
+        let url = self.url
+        let resume = self.resume
+        let snapshot = targetVideoFormat.withLock { $0 }
+        let startTime = resume.time.withLock { $0 }
+        let assetDuration = self.assetDuration
+        // The source owns cancellation; decoding state is task-local and resume is mutex-protected.
+        let new = Task.detached(priority: .userInitiated) { [sink, resume] in
+            await Self.run(url: url,
+                           startAt: startTime,
+                           assetDuration: assetDuration,
+                           targetVideoFormat: snapshot,
+                           sink: sink,
+                           resume: resume)
+        }
+        task.withLock { $0 = new }
     }
 }
