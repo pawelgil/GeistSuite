@@ -8,11 +8,13 @@ targets:
     platform: iOS
     sources:
       - path: PickerTestHost.swift
+      - path: PickerTestSceneDelegate.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.geistcast.picker-test-host
         SUPPORTS_MACCATALYST: YES
         GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         SWIFT_VERSION: "6.0"
   PickerAccessibilityTests:
     type: bundle.unit-test
