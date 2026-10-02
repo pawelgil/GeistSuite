@@ -13,7 +13,7 @@ struct SerializedSourceProviderTests {
 
         await withTaskGroup(of: ObjectIdentifier?.self) { group in
             for _ in 0 ..< 64 {
-                group.addTask {
+                group.addTask { @Sendable in
                     let sources = provider.value.copySources { shouldCache in
                         loadCount.withLock { $0 += 1 }
                         shouldCache.pointee = true

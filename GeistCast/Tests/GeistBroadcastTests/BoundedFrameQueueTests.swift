@@ -188,7 +188,7 @@ import Testing
 
         await withTaskGroup(of: Void.self) { group in
             for item in 1 ... 200 {
-                group.addTask {
+                group.addTask { @Sendable in
                     let weight = item % 7 + 1
                     if sut.enqueueOrDropNewest(item, weight: weight) == .accepted {
                         accepted.withLock { $0.append((item, weight)) }
