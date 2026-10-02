@@ -4,17 +4,20 @@ import Foundation
 final class BoundedFrameQueue<Element: Sendable>: @unchecked Sendable {
     // MARK: Nested Types
 
-    enum EnqueueOutcome: Equatable {
+    // Swift 6.3 requires explicit Sendable conformances for these task results.
+    // swiftformat:disable redundantSendable
+    enum EnqueueOutcome: Sendable, Equatable {
         case accepted
         case dropped
         case closed
     }
 
-    enum DequeueOutcome {
+    enum DequeueOutcome: Sendable {
         case received(Element)
         case empty
         case closed
     }
+    // swiftformat:enable redundantSendable
 
     private struct Entry {
         let element: Element

@@ -90,6 +90,35 @@ import Testing
     }
 
     @Test
+    func enqueue_childTask_returnsAcceptedOutcome() async {
+        let sut = BoundedFrameQueue<Int>(capacity: 1)
+        let item = 42
+
+        let outcome = await withTaskGroup(of: BoundedFrameQueue<Int>.EnqueueOutcome.self) { group in
+            group.addTask { sut.enqueueOrDropNewest(item) }
+            return await group.next()
+        }
+
+        #expect(outcome == .accepted)
+        #expect(sut.dequeue(timeoutSeconds: 0) == .received(item))
+    }
+
+    @Test
+    func dequeue_childTask_returnsReceivedItem() async {
+        let sut = BoundedFrameQueue<Int>(capacity: 1)
+        let item = 42
+        _ = sut.enqueueOrDropNewest(item)
+
+        let outcome = await withTaskGroup(of: BoundedFrameQueue<Int>.DequeueOutcome.self) { group in
+            group.addTask { sut.dequeue(timeoutSeconds: 0) }
+            return await group.next()
+        }
+
+        #expect(outcome == .received(item))
+        #expect(sut.dequeue(timeoutSeconds: 0) == .empty)
+    }
+
+    @Test
     func enqueue_weightExactlyFillsCapacity_acceptsThenDropsNewest() {
         let sut = BoundedFrameQueue<Int>(maximumWeight: 5, maximumCount: 10)
 
