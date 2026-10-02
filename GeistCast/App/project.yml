@@ -38,7 +38,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - package: Geist
-        product: GeistBroadcast
+        product: GeistCastKit
       - target: GeistCastCLI
         embed: true
         copy:
@@ -51,7 +51,7 @@ targets:
     dependencies:
       - target: GeistCast
       - package: Geist
-        product: GeistBroadcast
+        product: GeistCastKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.geistcast.geistcast.tests

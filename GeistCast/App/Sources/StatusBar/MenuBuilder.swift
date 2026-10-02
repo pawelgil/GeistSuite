@@ -3,19 +3,27 @@ import GeistBroadcast
 
 @MainActor
 struct MenuBuilder {
+    // MARK: Nested Types
+
     struct Actions {
         let pickMicSource: (_ simulatorUDID: String,
                             _ bundleID: String,
                             _ source: PersistableMicSource?) -> Void
         let pickDefaultMicSource: (_ source: PersistableMicSource) -> Void
         let chooseMicFile: (_ apply: @escaping (URL) -> Void) -> Void
+        let isScreenCaptureKitSupportEnabled: () -> Bool
         let isStreaming: (_ simulatorUDID: String, _ bundleID: String) -> Bool
         let stopBroadcast: (_ simulatorUDID: String, _ bundleID: String) -> Void
+        let toggleScreenCaptureKitSupport: () -> Void
     }
+
+    // MARK: Properties
 
     let preferences: PreferencesStore
     let globals: GlobalPreferences
     let actions: Actions
+
+    // MARK: Functions
 
     func build(entries: [AppDelegate.SimulatorApps]) -> NSMenu {
         let menu = NSMenu()
@@ -30,7 +38,9 @@ struct MenuBuilder {
 
         var rows: [(sim: BootedSimulator, app: BroadcastApp)] = []
         for entry in entries {
-            for app in entry.apps { rows.append((entry.simulator, app)) }
+            for app in entry.apps {
+                rows.append((entry.simulator, app))
+            }
         }
         rows.sort { ($0.app.displayName, $0.sim.name) < ($1.app.displayName, $1.sim.name) }
 
@@ -45,6 +55,7 @@ struct MenuBuilder {
         }
 
         menu.addItem(.separator())
+        menu.addItem(screenCaptureKitSupportItem())
         menu.addItem(preferencesItem())
         menu.addItem(supportItem())
         menu.addItem(.separator())
@@ -54,6 +65,15 @@ struct MenuBuilder {
             keyEquivalent: "q"
         ))
         return menu
+    }
+
+    private func screenCaptureKitSupportItem() -> NSMenuItem {
+        ClosureMenuItem(
+            title: "ScreenCaptureKit Simulator Support",
+            state: actions.isScreenCaptureKitSupportEnabled() ? .on : .off
+        ) {
+            actions.toggleScreenCaptureKitSupport()
+        }
     }
 
     private func supportItem() -> NSMenuItem {
@@ -201,7 +221,8 @@ struct MenuBuilder {
         menu.addItem(.separator())
 
         for item in micSourceRows(current: globals.defaultMicSource,
-                                  onPick: { actions.pickDefaultMicSource($0) }) {
+                                  onPick: { actions.pickDefaultMicSource($0) })
+        {
             menu.addItem(item)
         }
         return menu
@@ -248,9 +269,8 @@ struct MenuBuilder {
     private func displayLabel(_ source: PersistableMicSource) -> String {
         switch source {
         case .systemMicrophone: return "System microphone"
-        case .mediaFile(let path): return (path as NSString).lastPathComponent
+        case let .mediaFile(path): return (path as NSString).lastPathComponent
         case .disabled: return "Disabled"
         }
     }
-
 }

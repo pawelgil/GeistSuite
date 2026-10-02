@@ -1,17 +1,58 @@
 import AppKit
 import AVFoundation
 import GeistBroadcast
-import GeistBroadcast
+import GeistScreenCapture
 
 @main
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
-    GeistBroadcastSessionDelegate {
+    GeistBroadcastSessionDelegate
+{
+    // MARK: Nested Types
 
-    struct SimulatorApps: Sendable, Equatable {
+    struct SimulatorApps: Equatable {
         let simulator: BootedSimulator
         let apps: [BroadcastApp]
     }
+
+    private struct SessionKey: Hashable {
+        let simulator: String
+        let hostBundleID: String
+    }
+
+    private enum IconGeometry {
+        // MARK: Static Properties
+
+        static let size: CGFloat = 18
+        static let bodyWidth: CGFloat = 10
+        static let bodyHeight: CGFloat = 15.5
+        static let bodyCornerRadius: CGFloat = 2.25
+        static let strokeWidth: CGFloat = 1.1
+        static let bezelInset: CGFloat = 2.0
+        static let innerCornerRadius: CGFloat = 0.85
+
+        // MARK: Static Computed Properties
+
+        static var bodyRect: CGRect {
+            CGRect(
+                x: (size - bodyWidth) / 2,
+                y: (size - bodyHeight) / 2,
+                width: bodyWidth,
+                height: bodyHeight
+            )
+        }
+
+        static var innerRect: CGRect {
+            bodyRect.insetBy(dx: bezelInset, dy: bezelInset)
+        }
+    }
+
+    // MARK: Static Properties
+
+    private static let idleFillColor = NSColor.tertiaryLabelColor
+    private static let activeFillColor = NSColor.systemRed
+
+    // MARK: Properties
 
     private var statusItem: NSStatusItem?
     private var streamingDot: CAShapeLayer?
@@ -33,6 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             chooseMicFile: { [weak self] apply in
                 self?.chooseMicFile(apply: apply)
             },
+            isScreenCaptureKitSupportEnabled: { [weak self] in
+                self?.globals.screenCaptureKitSupportEnabled ?? false
+            },
             isStreaming: { [weak self] sim, bundle in
                 let key = SessionKey(simulator: sim, hostBundleID: bundle)
                 guard let self else { return false }
@@ -40,33 +84,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             },
             stopBroadcast: { [weak self] sim, bundle in
                 self?.stopBroadcast(simulatorUDID: sim, bundleID: bundle)
+            },
+            toggleScreenCaptureKitSupport: { [weak self] in
+                self?.toggleScreenCaptureKitSupport()
             }
         )
     )
     private let dylibPath: String?
+    private let screenCaptureKitInstaller: ScreenCaptureKitSupportInstaller
     private var cachedEntries: [SimulatorApps] = []
     private var sessions: [SessionKey: GeistBroadcastSession] = [:]
     private var streamingKeys: Set<SessionKey> = []
     private var inFlightKeys: Set<SessionKey> = []
     private var injectedSimulators: Set<String> = []
+    private var bootedSimulatorUDIDs: Set<String> = []
+    private var screenCaptureKitCompatibilityEnabled = false
+    private var screenCaptureKitSessions: [String: GeistScreenCaptureSession] = [:]
+    private var screenCaptureKitTransition: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
 
-    private struct SessionKey: Hashable {
-        let simulator: String
-        let hostBundleID: String
-    }
+    // MARK: Lifecycle
 
     override init() {
         let process = LiveProcess()
         let listing = ProcessBootedSimulatorsListing(process: process)
         self.listing = listing
-        self.injector = LaunchctlShimInjector(process: process)
-        self.dylibPath = (try? DylibInstaller.installIfNeeded())
+        injector = LaunchctlShimInjector(process: process)
+        screenCaptureKitInstaller = ScreenCaptureKitSupportInstaller(process: process)
+        dylibPath = (try? DylibInstaller.installIfNeeded())
         if dylibPath == nil {
             log.warn("DylibInstaller failed; auto-injection disabled.")
         }
         super.init()
     }
+
+    // MARK: Static Functions
 
     static func main() {
         let app = NSApplication.shared
@@ -76,7 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         app.run()
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    // MARK: Functions
+
+    func applicationDidFinishLaunching(_: Notification) {
         LogPaths.ensureLogsDir()
         LogPaths.truncateSessionLogs()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
@@ -87,23 +141,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         requestEagerPermissions()
         startCatalogPolling()
         startSimulatorWatching()
-    }
-
-    // Triggers the TCC prompt at launch so the app registers in
-    // Privacy & Security → Microphone before a broadcast needs the mic.
-    private func requestEagerPermissions() {
-        Task {
-            _ = await AVCaptureDevice.requestAccess(for: .audio)
+        if globals.screenCaptureKitSupportEnabled {
+            enqueueScreenCaptureKitTransition {
+                await self.enableScreenCaptureKitSupport(showConfirmation: false)
+            }
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    func applicationWillTerminate(_: Notification) {
         let sessionCount = sessions.count
         let injectedCount = injectedSimulators.count
         log.notice("applicationWillTerminate: stopping \(sessionCount) sessions, uninjecting from \(injectedCount) simulators")
         simulatorWatcher?.stop()
         pollTask?.cancel()
         let sessionList = Array(sessions.values)
+        let screenCaptureKitSessionList = Array(screenCaptureKitSessions.values)
         let injectedList = Array(injectedSimulators)
         let dylib = dylibPath
         let injector = self.injector
@@ -111,7 +163,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // Detached: a MainActor-isolated Task would deadlock against
         // the semaphore.wait() below.
         Task.detached {
-            for session in sessionList { await session.stop() }
+            for session in sessionList {
+                await session.stop()
+            }
+            for session in screenCaptureKitSessionList {
+                await session.stop()
+            }
             if let dylib {
                 for udid in injectedList {
                     do {
@@ -128,26 +185,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
-    private enum IconGeometry {
-        static let size: CGFloat = 18
-        static let bodyWidth: CGFloat = 10
-        static let bodyHeight: CGFloat = 15.5
-        static let bodyCornerRadius: CGFloat = 2.25
-        static let strokeWidth: CGFloat = 1.1
-        static let bezelInset: CGFloat = 2.0
-        static let innerCornerRadius: CGFloat = 0.85
+    // MARK: - Session delegate
 
-        static var bodyRect: CGRect {
-            CGRect(
-                x: (size - bodyWidth) / 2,
-                y: (size - bodyHeight) / 2,
-                width: bodyWidth,
-                height: bodyHeight
-            )
+    nonisolated func session(_: GeistBroadcastSession, broadcastStarted broadcast: Broadcast) {
+        log.notice("broadcastStarted: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID) sim=\(broadcast.simulatorUDID)")
+        Task { @MainActor in await self.recomputeStreamingState() }
+    }
+
+    nonisolated func session(_: GeistBroadcastSession, broadcastEnded broadcast: Broadcast) {
+        log.notice("broadcastEnded: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID)")
+        Task { @MainActor in await self.recomputeStreamingState() }
+    }
+
+    nonisolated func session(_: GeistBroadcastSession,
+                             broadcast: Broadcast,
+                             terminatedWithError error: Error)
+    {
+        log.error("broadcastTerminated: host=\(broadcast.hostAppBundleID) error=\(error)")
+        Task { @MainActor in await self.recomputeStreamingState() }
+    }
+
+    nonisolated func session(_: GeistBroadcastSession,
+                             broadcastFailedToStart broadcast: Broadcast,
+                             error: Error)
+    {
+        log.error("broadcastFailedToStart: host=\(broadcast.hostAppBundleID) error=\(error)")
+        Task { @MainActor in await self.recomputeStreamingState() }
+    }
+
+    nonisolated func session(_: GeistBroadcastSession, extensionConnectedFor extensionBundleID: String) {
+        log.notice("extensionConnected: \(extensionBundleID)")
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let fresh = menuBuilder.build(entries: cachedEntries)
+        let items = fresh.items
+        menu.removeAllItems()
+        for item in items {
+            fresh.removeItem(item)
+            menu.addItem(item)
         }
+    }
 
-        static var innerRect: CGRect {
-            bodyRect.insetBy(dx: bezelInset, dy: bezelInset)
+    /// Triggers the TCC prompt at launch so the app registers in
+    /// Privacy & Security → Microphone before a broadcast needs the mic.
+    private func requestEagerPermissions() {
+        Task {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
         }
     }
 
@@ -168,7 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func makeIPhoneOutlineImage() -> NSImage {
         let size = NSSize(width: IconGeometry.size, height: IconGeometry.size)
-        let image = NSImage(size: size, flipped: false) { _ in
+        return NSImage(size: size, flipped: false) { _ in
             let path = NSBezierPath(
                 roundedRect: IconGeometry.bodyRect,
                 xRadius: IconGeometry.bodyCornerRadius,
@@ -179,7 +263,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             path.stroke()
             return true
         }
-        return image
     }
 
     private func installStreamingFill(on button: NSStatusBarButton) {
@@ -198,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if let layer = button.layer {
             fill.position = CGPoint(x: layer.bounds.midX, y: layer.bounds.midY)
             fill.autoresizingMask = [.layerMinXMargin, .layerMaxXMargin,
-                                       .layerMinYMargin, .layerMaxYMargin]
+                                     .layerMinYMargin, .layerMaxYMargin]
             layer.addSublayer(fill)
         }
         streamingDot = fill
@@ -246,14 +329,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func handleSimulatorChange(added: Set<String>, removed: Set<String>) {
+        bootedSimulatorUDIDs.formUnion(added)
+        bootedSimulatorUDIDs.subtract(removed)
         for udid in added {
             log.notice("simulator booted: \(udid)")
-            Task { await self.injectIfNeeded(simulator: udid) }
+            Task {
+                await self.injectIfNeeded(simulator: udid)
+                self.enqueueScreenCaptureKitTransition {
+                    await self.startScreenCaptureKitSessionIfNeeded(simulator: udid)
+                }
+            }
         }
         for udid in removed {
             log.notice("simulator shutdown: \(udid)")
-            Task { await self.removeSessions(for: udid) }
+            Task {
+                await self.removeSessions(for: udid)
+                self.enqueueScreenCaptureKitTransition {
+                    await self.removeScreenCaptureKitSession(for: udid)
+                }
+            }
         }
+    }
+
+    private func toggleScreenCaptureKitSupport() {
+        if globals.screenCaptureKitSupportEnabled {
+            enqueueScreenCaptureKitTransition {
+                await self.disableScreenCaptureKitSupport()
+            }
+        } else {
+            enqueueScreenCaptureKitTransition {
+                await self.enableScreenCaptureKitSupport(showConfirmation: true)
+            }
+        }
+    }
+
+    private func enqueueScreenCaptureKitTransition(
+        _ operation: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        let previous = screenCaptureKitTransition
+        screenCaptureKitTransition = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+    }
+
+    private func enableScreenCaptureKitSupport(showConfirmation: Bool) async {
+        do {
+            switch try await screenCaptureKitInstaller.enable() {
+            case .compatibilityFramework:
+                globals.screenCaptureKitSupportEnabled = true
+                screenCaptureKitCompatibilityEnabled = true
+                for simulator in bootedSimulatorUDIDs {
+                    await startScreenCaptureKitSessionIfNeeded(simulator: simulator)
+                }
+                if showConfirmation { showXcodeRestartAlert() }
+            case .nativeSDK:
+                globals.screenCaptureKitSupportEnabled = true
+                screenCaptureKitCompatibilityEnabled = false
+                if showConfirmation { showNativeScreenCaptureKitAlert() }
+            }
+        } catch {
+            log.error("ScreenCaptureKit support failed: \(error)")
+            do {
+                try await screenCaptureKitInstaller.disable()
+                globals.screenCaptureKitSupportEnabled = false
+            } catch {
+                globals.screenCaptureKitSupportEnabled = true
+                log.warn("ScreenCaptureKit support rollback failed: \(error)")
+            }
+        }
+    }
+
+    private func disableScreenCaptureKitSupport() async {
+        do {
+            try await screenCaptureKitInstaller.disable()
+            globals.screenCaptureKitSupportEnabled = false
+            let activeSessions = Array(screenCaptureKitSessions.values)
+            screenCaptureKitSessions.removeAll()
+            screenCaptureKitCompatibilityEnabled = false
+            for session in activeSessions {
+                await session.stop()
+            }
+        } catch {
+            globals.screenCaptureKitSupportEnabled = true
+            log.warn("ScreenCaptureKit support disable failed: \(error)")
+        }
+    }
+
+    private func startScreenCaptureKitSessionIfNeeded(simulator: String) async {
+        guard screenCaptureKitCompatibilityEnabled,
+              screenCaptureKitSessions[simulator] == nil,
+              let simulatorID = UUID(uuidString: simulator)
+        else { return }
+        do {
+            let session = try GeistScreenCaptureSession(simulator: simulatorID)
+            try await session.start()
+            screenCaptureKitSessions[simulator] = session
+            log.notice("ScreenCaptureKit session started: \(simulator)")
+        } catch {
+            log.warn("ScreenCaptureKit session failed for \(simulator): \(error)")
+        }
+    }
+
+    private func removeScreenCaptureKitSession(for simulator: String) async {
+        guard let session = screenCaptureKitSessions.removeValue(forKey: simulator) else { return }
+        await session.stop()
+    }
+
+    private func showXcodeRestartAlert() {
+        let alert = NSAlert()
+        alert.messageText = "ScreenCaptureKit Simulator Support Enabled"
+        alert.informativeText = "Restart Xcode once. Existing projects can then import ScreenCaptureKit for simulator builds without project changes."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showNativeScreenCaptureKitAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Native ScreenCaptureKit Simulator Support Available"
+        alert.informativeText = "GeistCast removed its compatibility override. Restart Xcode once to use the framework included with the selected SDK."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func injectIfNeeded(simulator: String) async {
@@ -303,7 +500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                     simulator: udid,
                     hostBundleID: key.hostBundleID,
                     micAudio: resolvedMicAudio(simulatorUDID: key.simulator,
-                                                bundleID: key.hostBundleID),
+                                               bundleID: key.hostBundleID),
                     delegate: self
                 )
                 try await session.start()
@@ -335,7 +532,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func setMicSource(_ source: PersistableMicSource?,
                               simulatorUDID: String,
-                              bundleID: String) {
+                              bundleID: String)
+    {
         preferences.setMicSource(source, simulatorUDID: simulatorUDID, bundleID: bundleID)
         let resolved = resolvedMicAudio(simulatorUDID: simulatorUDID, bundleID: bundleID)
         let key = SessionKey(simulator: simulatorUDID, hostBundleID: bundleID)
@@ -348,7 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         globals.defaultMicSource = source
         for (key, session) in sessions {
             let perApp = preferences.micSource(simulatorUDID: key.simulator,
-                                                bundleID: key.hostBundleID)
+                                               bundleID: key.hostBundleID)
             if perApp == nil {
                 Task { await session.setMicAudio(MicSourceFactory.make(source)) }
             }
@@ -382,42 +580,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
-    // MARK: - Session delegate
-
-    nonisolated func session(_: GeistBroadcastSession, broadcastStarted broadcast: Broadcast) {
-        log.notice("broadcastStarted: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID) sim=\(broadcast.simulatorUDID)")
-        Task { @MainActor in await self.recomputeStreamingState() }
-    }
-
-    nonisolated func session(_: GeistBroadcastSession, broadcastEnded broadcast: Broadcast) {
-        log.notice("broadcastEnded: host=\(broadcast.hostAppBundleID) ext=\(broadcast.extensionBundleID)")
-        Task { @MainActor in await self.recomputeStreamingState() }
-    }
-
-    nonisolated func session(_: GeistBroadcastSession,
-                              broadcast: Broadcast,
-                              terminatedWithError error: Error) {
-        log.error("broadcastTerminated: host=\(broadcast.hostAppBundleID) error=\(error)")
-        Task { @MainActor in await self.recomputeStreamingState() }
-    }
-
-    nonisolated func session(_: GeistBroadcastSession,
-                              broadcastFailedToStart broadcast: Broadcast,
-                              error: Error) {
-        log.error("broadcastFailedToStart: host=\(broadcast.hostAppBundleID) error=\(error)")
-        Task { @MainActor in await self.recomputeStreamingState() }
-    }
-
-    nonisolated func session(_: GeistBroadcastSession, extensionConnectedFor extensionBundleID: String) {
-        log.notice("extensionConnected: \(extensionBundleID)")
-    }
-
-    private static let idleFillColor = NSColor.tertiaryLabelColor
-    private static let activeFillColor = NSColor.systemRed
-
-    // Single source of truth for streaming state. Recomputing from the
-    // session's `activeBroadcasts` avoids stale entries from delegate
-    // callbacks that don't cover every termination path.
+    /// Single source of truth for streaming state. Recomputing from the
+    /// session's `activeBroadcasts` avoids stale entries from delegate
+    /// callbacks that don't cover every termination path.
     private func recomputeStreamingState() async {
         var streaming: Set<SessionKey> = []
         var inFlight: Set<SessionKey> = []
@@ -438,15 +603,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func refreshStreamingDot() {
         let color = streamingKeys.isEmpty ? Self.idleFillColor : Self.activeFillColor
         streamingDot?.fillColor = color.cgColor
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        let fresh = menuBuilder.build(entries: cachedEntries)
-        let items = fresh.items
-        menu.removeAllItems()
-        for item in items {
-            fresh.removeItem(item)
-            menu.addItem(item)
-        }
     }
 }

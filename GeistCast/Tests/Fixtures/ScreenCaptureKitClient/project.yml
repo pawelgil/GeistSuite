@@ -1,0 +1,17 @@
+name: ScreenCaptureKitClient
+options:
+  bundleIdPrefix: com.geistcast.tests
+targets:
+  ScreenCaptureKitClient:
+    type: application
+    platform: iOS
+    deploymentTarget: "27.0"
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.geistcast.tests.screencapturekit-client
+        SWIFT_VERSION: "6.0"
+        CODE_SIGNING_ALLOWED: NO
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

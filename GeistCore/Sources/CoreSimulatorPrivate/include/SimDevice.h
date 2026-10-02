@@ -239,7 +239,7 @@
 - (_Bool)addVideo:(_Nullable id)video error:(id _Nullable * _Nullable)error;
 - (_Bool)setKeyboardLanguage:(_Nullable id)language error:(id _Nullable * _Nullable)error;
 - (_Bool)setHardwareKeyboardEnabled:(_Bool)enabled keyboardType:(unsigned char)type error:(id _Nullable * _Nullable)error;
-- (_Bool)installApplication:(_Nullable id)application withOptions:(_Nullable id)options error:(NSError * _Nullable * _Nullable)error;
+- (_Bool)installApplication:(NSURL * _Nullable)application withOptions:(NSDictionary * _Nullable)options error:(NSError * _Nullable * _Nullable)error;
 - (_Bool)uninstallApplication:(_Nullable id)application withOptions:(_Nullable id)options error:(NSError * _Nullable * _Nullable)error;
 - (_Bool)applicationIsInstalled:(_Nullable id)installed type:(id _Nullable * _Nullable)type error:(id _Nullable * _Nullable)error;
 - (_Nullable id)propertiesOfApplication:(_Nullable id)application error:(id _Nullable * _Nullable)error;

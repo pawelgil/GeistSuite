@@ -7,6 +7,8 @@ let package = Package(
     products: [
         .library(name: "GeistCamera", targets: ["GeistCamera"]),
         .library(name: "GeistBroadcast", targets: ["GeistBroadcast"]),
+        .library(name: "GeistCastKit", targets: ["GeistBroadcast", "GeistScreenCapture"]),
+        .library(name: "GeistScreenCapture", targets: ["GeistScreenCapture"]),
     ],
     targets: [
         // MARK: - GeistCore
@@ -116,13 +118,59 @@ let package = Package(
             path: "GeistCast/Tests/GeistBroadcastTests"
         ),
 
+        // MARK: - GeistCast (ScreenCaptureKit)
+
+        .target(
+            name: "GeistScreenCaptureShimCore",
+            dependencies: ["SharedShimCore"],
+            path: "GeistCast/Sources/GeistScreenCaptureShimCore",
+            publicHeadersPath: "include"
+        ),
+
+        .target(
+            name: "GeistScreenCapture",
+            dependencies: [
+                "CoreSimulator",
+                "CoreSimulatorPrivate",
+                "GeistKit",
+                "GeistScreenCaptureShimCore",
+                "SimulatorScreenCapture",
+            ],
+            path: "GeistCast/Sources/GeistScreenCapture",
+            plugins: ["BuildScreenCaptureKit"]
+        ),
+
+        .testTarget(
+            name: "GeistScreenCaptureTests",
+            dependencies: ["GeistScreenCapture", "GeistScreenCaptureShimCore"],
+            path: "GeistCast/Tests/GeistScreenCaptureTests"
+        ),
+
+        .plugin(
+            name: "BuildScreenCaptureKit",
+            capability: .buildTool(),
+            path: "GeistCore/Plugins/BuildScreenCaptureKit"
+        ),
+
         // MARK: - GeistCast smoke test (the §0 spike from NO_SHELLOUT_RESEARCH.md;
+
         // kept as a runnable end-to-end smoke test against a booted simulator)
 
         .executableTarget(
             name: "RecodeSpike",
             dependencies: ["CoreSimulatorPrivate", "CoreSimulator", "SecurityPrivate"],
             path: "GeistCast/Spike/RecodeSpike"
+        ),
+
+        .executableTarget(
+            name: "ScreenCaptureKitSmoke",
+            dependencies: [
+                "CoreSimulatorPrivate",
+                "CoreSimulator",
+                "GeistKit",
+                "GeistScreenCapture",
+            ],
+            path: "GeistCast/Spike/ScreenCaptureKitSmoke"
         ),
     ]
 )
