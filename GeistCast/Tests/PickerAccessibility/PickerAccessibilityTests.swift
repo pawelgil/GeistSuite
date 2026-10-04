@@ -52,6 +52,40 @@ struct PickerAccessibilityTests {
         #expect(button.accessibilityTraits.contains(.notEnabled))
     }
 
+    @Test func backdrop_activation_invokesDismissalWithoutAddingContent() {
+        let backdrop = GCDismissBackdropView(frame: .zero)
+        let spy = ActionSpy()
+        backdrop.dismissalHandler = { spy.activate() }
+        #expect(backdrop.accessibilityActivate())
+        #expect(spy.count == 1)
+        #expect(backdrop.subviews.isEmpty)
+        #expect(backdrop.accessibilityLabel == "Dismiss broadcast sheet")
+    }
+
+    @Test func backdrop_starting_rejectsActivationAndEscape() {
+        let backdrop = GCDismissBackdropView(frame: .zero)
+        let spy = ActionSpy()
+        backdrop.dismissalHandler = { spy.activate() }
+        backdrop.dismissalEnabled = false
+        #expect(!backdrop.accessibilityActivate())
+        #expect(!backdrop.accessibilityPerformEscape())
+        #expect(spy.count == 0)
+        #expect(backdrop.accessibilityTraits.contains(.notEnabled))
+    }
+
+    @Test func backdrop_escape_invokesOwnedDismissal() {
+        let backdrop = GCDismissBackdropView(frame: .zero)
+        let spy = ActionSpy()
+        backdrop.dismissalHandler = { spy.activate() }
+        #expect(backdrop.accessibilityPerformEscape())
+        #expect(spy.count == 1)
+    }
+
+    @Test func backdrop_missingHandler_reportsUnsupportedActivation() {
+        let backdrop = GCDismissBackdropView(frame: .zero)
+        #expect(!backdrop.accessibilityActivate())
+    }
+
     @Test func microphone_accessibilityActivation_obeysEnabledState() throws {
         let button = try #require(GCCircleGlassButton(size: 56))
         let spy = ActionSpy()
