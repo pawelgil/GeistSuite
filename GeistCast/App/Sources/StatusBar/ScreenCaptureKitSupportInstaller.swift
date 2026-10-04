@@ -2,17 +2,13 @@ import Foundation
 import GeistScreenCapture
 
 struct ScreenCaptureKitSupportInstaller {
-    // MARK: Nested Types
-
     enum Result: Equatable {
         case compatibilityFramework
         case nativeSDK
     }
 
     struct Paths {
-        // MARK: Static Properties
-
-        static let live: Self = {
+            static let live: Self = {
             let root = (NSHomeDirectory() as NSString)
                 .appendingPathComponent("Library/Application Support/GeistCast")
             return Self(
@@ -24,42 +20,30 @@ struct ScreenCaptureKitSupportInstaller {
             )
         }()
 
-        // MARK: Properties
-
-        let configurationPath: String
+            let configurationPath: String
         let frameworkPath: String
         let installRoot: String
     }
-
-    // MARK: Static Properties
 
     static let installRoot = Paths.live.installRoot
     static let frameworkPath = Paths.live.frameworkPath
     static let configurationPath = Paths.live.configurationPath
 
-    // MARK: Properties
-
-    private let process: any ProcessRunning
-    private let fileManager: SendableFileManager
-    private let installedConfiguration: @Sendable () -> String?
+    private let environment: any ScreenCaptureKitBuildEnvironment
+    private let framework: any ScreenCaptureKitFrameworkInstalling
     private let paths: Paths
 
-    // MARK: Lifecycle
-
-    init(
-        process: any ProcessRunning,
-        fileManager: FileManager = .default,
-        paths: Paths = .live,
-        installedConfiguration: (@Sendable () -> String?)? = nil
-    ) {
-        self.process = process
-        self.fileManager = SendableFileManager(fileManager)
-        self.paths = paths
-        self.installedConfiguration = installedConfiguration
-            ?? { Self.installedConfiguration(at: paths.configurationPath) }
+    init(process: any ProcessRunning, paths: Paths = .live) {
+        self.init(environment: LiveScreenCaptureKitBuildEnvironment(process: process),
+                  framework: ScreenCaptureKitFrameworkInstaller(process: process), paths: paths)
     }
 
-    // MARK: Static Functions
+    init(environment: any ScreenCaptureKitBuildEnvironment,
+         framework: any ScreenCaptureKitFrameworkInstalling, paths: Paths) {
+        self.environment = environment
+        self.framework = framework
+        self.paths = paths
+    }
 
     static func configuration(
         existingConfiguration: String,
@@ -103,106 +87,46 @@ struct ScreenCaptureKitSupportInstaller {
             .replacingOccurrences(of: "\\\\", with: "\\")
     }
 
-    // MARK: Functions
-
     func enable() async throws -> Result {
-        let sdkPath = try await simulatorSDKPath()
+        let sdkPath = try await environment.simulatorSDKPath()
         let nativeFramework = (sdkPath as NSString)
             .appendingPathComponent("System/Library/Frameworks/ScreenCaptureKit.framework")
-        guard !fileManager.value.fileExists(atPath: nativeFramework) else {
+        guard !FileManager.default.fileExists(atPath: nativeFramework) else {
             try await disable()
             return .nativeSDK
         }
-
-        try fileManager.value.createDirectory(
-            atPath: paths.installRoot,
-            withIntermediateDirectories: true
-        )
-        let stagingRoot = (paths.installRoot as NSString)
-            .appendingPathComponent(".ScreenCaptureKit-\(UUID().uuidString)")
-        try fileManager.value.createDirectory(atPath: stagingRoot, withIntermediateDirectories: false)
-        defer { try? fileManager.value.removeItem(atPath: stagingRoot) }
-        let stagedFramework = (stagingRoot as NSString)
-            .appendingPathComponent("ScreenCaptureKit.framework")
-        let archive = try ScreenCaptureKitFrameworkBundled.archiveURL()
-        _ = try await process.run(
-            executable: "/usr/bin/ditto",
-            arguments: ["-x", "-k", archive.path, stagingRoot]
-        )
-        _ = try await process.run(
-            executable: "/usr/bin/codesign",
-            arguments: ["--force", "--sign", "-", stagedFramework]
-        )
-        if fileManager.value.fileExists(atPath: paths.frameworkPath) {
-            _ = try fileManager.value.replaceItemAt(
-                URL(fileURLWithPath: paths.frameworkPath),
-                withItemAt: URL(fileURLWithPath: stagedFramework)
-            )
-        } else {
-            try fileManager.value.moveItem(atPath: stagedFramework, toPath: paths.frameworkPath)
-        }
-
-        let existing = try await xcodeConfigurationEnvironment()
+        try await framework.install(at: paths)
+        try Task.checkCancellation()
+        let existing = try await environment.configuration()
+        let url = URL(fileURLWithPath: paths.configurationPath)
+        let previousContents = try? Data(contentsOf: url)
         let contents = Self.configuration(
             existingConfiguration: Self.inheritedConfiguration(
                 active: existing,
-                installed: installedConfiguration(),
+                installed: Self.installedConfiguration(at: paths.configurationPath),
                 installedConfigurationPath: paths.configurationPath
             ),
             frameworkDirectory: paths.installRoot,
             installedConfigurationPath: paths.configurationPath
         )
-        try Data(contents.utf8).write(
-            to: URL(fileURLWithPath: paths.configurationPath),
-            options: .atomic
-        )
-        _ = try await process.run(
-            executable: "/bin/launchctl",
-            arguments: ["setenv", "XCODE_XCCONFIG_FILE", paths.configurationPath]
-        )
+        try Data(contents.utf8).write(to: url, options: .atomic)
+        do {
+            try Task.checkCancellation()
+            try await environment.setConfiguration(paths.configurationPath)
+        } catch {
+            if let previousContents {
+                try previousContents.write(to: url, options: .atomic)
+            } else {
+                try FileManager.default.removeItem(at: url)
+            }
+            throw error
+        }
         return .compatibilityFramework
     }
 
     func disable() async throws {
-        let existing = try await xcodeConfigurationEnvironment()
+        let existing = try await environment.configuration()
         guard existing == paths.configurationPath else { return }
-        let previous = installedConfiguration()
-        let arguments = if let previous, !previous.isEmpty {
-            ["setenv", "XCODE_XCCONFIG_FILE", previous]
-        } else {
-            ["unsetenv", "XCODE_XCCONFIG_FILE"]
-        }
-        _ = try await process.run(executable: "/bin/launchctl", arguments: arguments)
-    }
-
-    private func simulatorSDKPath() async throws -> String {
-        let data = try await process.run(
-            executable: "/usr/bin/xcrun",
-            arguments: ["--sdk", "iphonesimulator", "--show-sdk-path"]
-        )
-        return String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func xcodeConfigurationEnvironment() async throws -> String {
-        let data = try await process.run(
-            executable: "/bin/launchctl",
-            arguments: ["getenv", "XCODE_XCCONFIG_FILE"]
-        )
-        return String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-/// Foundation documents FileManager as safe for concurrent use from multiple threads.
-private struct SendableFileManager: @unchecked Sendable {
-    // MARK: Properties
-
-    let value: FileManager
-
-    // MARK: Lifecycle
-
-    init(_ value: FileManager) {
-        self.value = value
+        try await environment.setConfiguration(Self.installedConfiguration(at: paths.configurationPath) ?? "")
     }
 }

@@ -14,7 +14,10 @@ public struct SCContentSharingPickerConfiguration {
     @available(tvOS, unavailable)
     public var allowedPickerModes: SCContentSharingPickerMode {
         get { storage.allowedPickerModes }
-        set { storage.allowedPickerModes = newValue }
+        set {
+            storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
+            storage.allowedPickerModes = newValue
+        }
     }
 
     @available(macOS 14.0, macCatalyst 18.2, *)
@@ -23,7 +26,10 @@ public struct SCContentSharingPickerConfiguration {
     @available(tvOS, unavailable)
     public var excludedWindowIDs: [Int] {
         get { storage.excludedWindowIDs.map(\.intValue) }
-        set { storage.excludedWindowIDs = newValue.map(NSNumber.init(value:)) }
+        set {
+            storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
+            storage.excludedWindowIDs = newValue.map(NSNumber.init(value:))
+        }
     }
 
     @available(macOS 14.0, macCatalyst 18.2, *)
@@ -32,7 +38,10 @@ public struct SCContentSharingPickerConfiguration {
     @available(tvOS, unavailable)
     public var excludedBundleIDs: [String] {
         get { storage.excludedBundleIDs }
-        set { storage.excludedBundleIDs = newValue }
+        set {
+            storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
+            storage.excludedBundleIDs = newValue
+        }
     }
 
     @available(macOS 14.0, macCatalyst 18.2, *)
@@ -41,7 +50,10 @@ public struct SCContentSharingPickerConfiguration {
     @available(tvOS, unavailable)
     public var allowsChangingSelectedContent: Bool {
         get { storage.allowsChangingSelectedContent }
-        set { storage.allowsChangingSelectedContent = newValue }
+        set {
+            storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
+            storage.allowsChangingSelectedContent = newValue
+        }
     }
 
     @available(iOS 27.0, visionOS 27.0, *)
@@ -50,7 +62,10 @@ public struct SCContentSharingPickerConfiguration {
     @available(tvOS, unavailable)
     public var showsMicrophoneControl: Bool {
         get { storage.showsMicrophoneControl }
-        set { storage.showsMicrophoneControl = newValue }
+        set {
+            storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
+            storage.showsMicrophoneControl = newValue
+        }
     }
 
     @available(iOS 27.0, *)
@@ -59,7 +74,10 @@ public struct SCContentSharingPickerConfiguration {
     @available(visionOS, unavailable)
     public var showsCameraControl: Bool {
         get { storage.showsCameraControl }
-        set { storage.showsCameraControl = newValue }
+        set {
+            storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
+            storage.showsCameraControl = newValue
+        }
     }
 
     // MARK: Lifecycle
@@ -69,7 +87,7 @@ public struct SCContentSharingPickerConfiguration {
     }
 
     fileprivate init(storage: __SCContentSharingPickerConfiguration<AnyObject>) {
-        self.storage = storage
+        self.storage = storage.copy() as! __SCContentSharingPickerConfiguration<AnyObject>
     }
 }
 

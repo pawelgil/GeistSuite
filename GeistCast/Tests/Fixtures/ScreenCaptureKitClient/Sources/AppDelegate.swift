@@ -10,6 +10,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate,
     // MARK: Properties
 
     private var stream: SCStream?
+    private var completedCaptures = 0
+    private var restarting = false
+    private var previousTimestamp = CMTime.invalid
     private var clipBufferingOutput: SCClipBufferingOutput?
     private var expectedFrameSize: (width: Int, height: Int)?
     private var recordingEditor: SCRecordingEditor?
@@ -41,6 +44,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate,
         let picker = SCContentSharingPicker.shared
         var configuration = SCContentSharingPickerConfiguration()
         configuration.showsMicrophoneControl = true
+        var copy = configuration
+        copy.showsMicrophoneControl = false
+        guard configuration.showsMicrophoneControl else {
+            Self.report("SCK_CONFIGURATION_COPY_ERROR")
+            return true
+        }
         picker.configuration = configuration
         picker.add(self)
         picker.isActive = true
@@ -79,6 +88,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate,
             return
         }
         let capture = SCStream(filter: filter, configuration: configuration, delegate: nil)
+        var streamPickerConfiguration = SCContentSharingPickerConfiguration()
+        streamPickerConfiguration.showsMicrophoneControl = false
+        SCContentSharingPicker.shared.setConfiguration(streamPickerConfiguration, for: capture)
+        guard SCContentSharingPicker.shared.defaultConfiguration.showsMicrophoneControl else {
+            Self.report("SCK_STREAM_CONFIGURATION_LEAK")
+            return
+        }
         guard let recordingOutput,
               rejectsUnsupported({ try capture.addRecordingOutput(recordingOutput) }),
               let clipBufferingOutput,
@@ -104,7 +120,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate,
     }
 
     func stream(
-        _: SCStream,
+        _ capture: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
@@ -118,7 +134,44 @@ final class AppDelegate: UIResponder, UIApplicationDelegate,
             Self.report("SCK_INVALID_FRAME")
             return
         }
-        Self.report("SCK_FRAME_OK")
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                as? [[SCStreamFrameInfo: Any]],
+              let metadata = attachments.first,
+              metadata[.status] as? Int == SCFrameStatus.complete.rawValue,
+              let contentRect = metadata[.contentRect] as? NSDictionary,
+              CGRect(dictionaryRepresentation: contentRect as CFDictionary) != nil,
+              metadata[.scaleFactor] as? Double != nil
+        else {
+            Self.report("SCK_INVALID_METADATA")
+            return
+        }
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard timestamp.isNumeric, timestamp > .zero,
+              !previousTimestamp.isValid || timestamp >= previousTimestamp else {
+            Self.report("SCK_INVALID_TIMESTAMP")
+            return
+        }
+        previousTimestamp = timestamp
+        guard !restarting else { return }
+        completedCaptures += 1
+        if completedCaptures == 3 {
+            Self.report("SCK_FRAME_OK")
+            return
+        }
+        restarting = true
+        Task { @MainActor in
+            do {
+                try await capture.stopCapture()
+                guard !capture.isCapturing else {
+                    Self.report("SCK_STOP_ERROR")
+                    return
+                }
+                restarting = false
+                try await capture.startCapture()
+            } catch {
+                Self.report("SCK_RESTART_ERROR \(error)")
+            }
+        }
     }
 
     private func rejectsUnsupported(_ operation: () throws -> Void) -> Bool {

@@ -79,3 +79,13 @@ targets:
     dependencies:
       - package: Geist
         product: GeistBroadcast
+schemes:
+  GeistCast:
+    build:
+      targets:
+        GeistCast: all
+    test:
+      targets:
+        - GeistCastTests
+      environmentVariables:
+        DYLD_FRAMEWORK_PATH: /Library/Developer/PrivateFrameworks:$(BUILT_PRODUCTS_DIR)

@@ -3,8 +3,6 @@ import Foundation
 import GeistScreenCaptureShimCore
 
 public actor GeistScreenCaptureSession {
-    // MARK: Nested Types
-
     public enum Error: Swift.Error, Equatable {
         case alreadyStarted
         case bind(errno: Int32)
@@ -12,24 +10,21 @@ public actor GeistScreenCaptureSession {
         case socketCreate(errno: Int32)
     }
 
-    // MARK: Properties
-
     public nonisolated let simulator: UUID
     public nonisolated let socketPath: String
 
     private let coordinator: CaptureCoordinator
     private let writer: SocketFrameWriter
-    private let acceptQueue = DispatchQueue(label: "com.geist.screencapture.accept")
     private let connectionQueue = DispatchQueue(
         label: "com.geist.screencapture.connection",
         attributes: .concurrent
     )
-    private var acceptSource: DispatchSourceRead?
-    private var listenerFD: Int32 = -1
-    private var activeFD: Int32?
-    private var connectionGeneration: UInt64 = 0
-
-    // MARK: Lifecycle
+    private var listener: CaptureListener?
+    private var activeConnection: CaptureConnection?
+    private var pendingConnections: [UUID: CaptureConnection] = [:]
+    private var generation = UUID()
+    private var transition: Task<Void, Never>?
+    private var stopping = false
 
     public init(
         simulator: UUID,
@@ -58,209 +53,145 @@ public actor GeistScreenCaptureSession {
         self.writer = writer
     }
 
-    // MARK: Static Functions
-
-    private nonisolated static func openListener(path: String) throws -> Int32 {
-        unlinkSocket(path)
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw Error.socketCreate(errno: errno) }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        guard path.utf8.count < MemoryLayout.size(ofValue: address.sun_path) else {
-            close(fd)
-            throw Error.bind(errno: ENAMETOOLONG)
-        }
-        withUnsafeMutableBytes(of: &address.sun_path) { bytes in
-            bytes.initializeMemory(as: UInt8.self, repeating: 0)
-            path.utf8CString.withUnsafeBytes { source in
-                bytes.copyBytes(from: source)
-            }
-        }
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            let value = errno
-            close(fd)
-            throw Error.bind(errno: value)
-        }
-        chmod(path, S_IRUSR | S_IWUSR)
-        guard Darwin.listen(fd, 4) == 0 else {
-            let value = errno
-            close(fd)
-            unlinkSocket(path)
-            throw Error.listen(errno: value)
-        }
-        return fd
+    deinit {
+        listener?.stop()
+        for client in pendingConnections.values { client.shutdown() }
+        activeConnection?.shutdown()
+        writer.close()
     }
-
-    private nonisolated static func acceptClient(_ listener: Int32) -> Int32? {
-        let fd = Darwin.accept(listener, nil, nil)
-        guard fd >= 0 else { return nil }
-        var noSigPipe: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-        return fd
-    }
-
-    private nonisolated static func read(_ fd: Int32, count: Int) -> Data? {
-        var data = Data(count: count)
-        let readCount = data.withUnsafeMutableBytes { bytes -> Int in
-            guard let base = bytes.baseAddress else { return 0 }
-            var offset = 0
-            while offset < count {
-                let result = Darwin.read(fd, base.advanced(by: offset), count - offset)
-                guard result > 0 else { return -1 }
-                offset += result
-            }
-            return offset
-        }
-        return readCount == count ? data : nil
-    }
-
-    @discardableResult
-    private nonisolated static func respond(_ status: Int32, to fd: Int32) -> Bool {
-        var response = geist_sck_start_response_t(
-            magic: GEIST_SCK_WIRE_MAGIC,
-            status: status
-        )
-        return withUnsafeBytes(of: &response) { bytes in
-            guard let base = bytes.baseAddress else { return true }
-            var offset = 0
-            while offset < bytes.count {
-                let result = Darwin.write(fd, base.advanced(by: offset), bytes.count - offset)
-                guard result > 0 else { return false }
-                offset += result
-            }
-            return true
-        }
-    }
-
-    private nonisolated static func close(_ fd: Int32) {
-        shutdown(fd, SHUT_RDWR)
-        Darwin.close(fd)
-    }
-
-    private nonisolated static func isDisconnected(_ fd: Int32) -> Bool {
-        var byte: UInt8 = 0
-        let result = Darwin.recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
-        return result == 0 || result < 0 && errno != EAGAIN && errno != EWOULDBLOCK
-    }
-
-    private nonisolated static func unlinkSocket(_ path: String) {
-        var metadata = stat()
-        guard lstat(path, &metadata) == 0,
-              metadata.st_mode & S_IFMT == S_IFSOCK
-        else { return }
-        unlink(path)
-    }
-
-    // MARK: Functions
 
     public func start() async throws {
-        guard listenerFD < 0 else { throw Error.alreadyStarted }
-        let listener = try Self.openListener(path: socketPath)
-        listenerFD = listener
-        startAccepting(listener)
+        guard listener == nil, !stopping else { throw Error.alreadyStarted }
+        generation = UUID()
+        let epoch = generation
+        listener = try CaptureListener(path: socketPath) { [weak self] client in
+            Task { await self?.accept(client, generation: epoch) }
+        }
+        log.notice("ScreenCaptureKit listener started: \(simulator)")
     }
 
     public func stop() async {
-        await coordinator.stop()
-        writer.close()
-        activeFD = nil
-        connectionGeneration &+= 1
-        if listenerFD >= 0 {
-            acceptSource?.cancel()
-            acceptSource = nil
-            Self.close(listenerFD)
-            listenerFD = -1
-            Self.unlinkSocket(socketPath)
+        if stopping {
+            await transition?.value
+            return
         }
+        stopping = true
+        generation = UUID()
+        listener?.stop()
+        listener = nil
+        for client in pendingConnections.values { client.shutdown() }
+        pendingConnections.removeAll()
+        activeConnection?.shutdown()
+        let cleanup = enqueue { await self.stopCapture() }
+        await cleanup.value
+        stopping = false
     }
 
-    private func startAccepting(_ listener: Int32) {
-        let source = DispatchSource.makeReadSource(fileDescriptor: listener, queue: acceptQueue)
-        source.setEventHandler { [weak self] in
-            guard let client = Self.acceptClient(listener) else { return }
-            self?.readRequest(from: client)
+    @discardableResult
+    private func enqueue(_ operation: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        let previous = transition
+        let task = Task {
+            await previous?.value
+            await operation()
         }
-        source.resume()
-        acceptSource = source
+        transition = task
+        return task
     }
 
-    private nonisolated func readRequest(from fd: Int32) {
+    private func accept(_ client: CaptureConnection, generation: UUID) {
+        guard listener != nil, self.generation == generation,
+              pendingConnections.count < 8
+        else {
+            client.shutdown()
+            return
+        }
+        let id = UUID()
+        pendingConnections[id] = client
         connectionQueue.async { [weak self] in
-            guard let data = Self.read(fd, count: StartRequest.byteCount) else {
-                Self.close(fd)
-                return
-            }
-            Task { await self?.handleRequest(data, from: fd) }
+            let request = client.read(count: StartRequest.byteCount)
+            Task { await self?.received(request, from: client, id: id, generation: generation) }
         }
     }
 
-    private func handleRequest(_ data: Data, from fd: Int32) async {
+    private func received(_ data: Data?, from client: CaptureConnection, id: UUID, generation: UUID) {
+        guard pendingConnections[id] != nil else { return }
+        enqueue {
+            await self.handleRequest(data, from: client, id: id, generation: generation)
+        }
+    }
+
+    private func handleRequest(_ data: Data?, from client: CaptureConnection, id: UUID, generation: UUID) async {
+        defer { pendingConnections.removeValue(forKey: id) }
+        guard self.generation == generation, let data else {
+            client.shutdown()
+            return
+        }
         let request: StartRequest
         do {
             request = try StartRequest.decode(data)
         } catch StartRequest.Error.notSupported {
-            Self.respond(GEIST_SCK_STATUS_NOT_SUPPORTED, to: fd)
-            Self.close(fd)
+            reject(client, status: GEIST_SCK_STATUS_NOT_SUPPORTED)
             return
         } catch {
-            Self.respond(GEIST_SCK_STATUS_INVALID_REQUEST, to: fd)
-            Self.close(fd)
+            reject(client, status: GEIST_SCK_STATUS_INVALID_REQUEST)
             return
         }
-
-        if let activeFD, Self.isDisconnected(activeFD) {
-            self.activeFD = nil
-            connectionGeneration &+= 1
-            await coordinator.stop()
-            writer.close()
+        if let activeConnection, activeConnection.isDisconnected {
+            await stopCapture()
         }
-        guard activeFD == nil else {
-            Self.respond(GEIST_SCK_STATUS_BUSY, to: fd)
-            Self.close(fd)
+        guard self.generation == generation else {
+            client.shutdown()
+            return
+        }
+        guard activeConnection == nil else {
+            reject(client, status: GEIST_SCK_STATUS_BUSY)
             return
         }
         do {
             try await coordinator.start(outputs: request.outputs)
-        } catch CaptureCoordinator.Error.busy {
-            Self.respond(GEIST_SCK_STATUS_BUSY, to: fd)
-            Self.close(fd)
-            return
         } catch {
-            Self.respond(GEIST_SCK_STATUS_FAILED, to: fd)
-            Self.close(fd)
+            log.warn("ScreenCaptureKit capture failed: \(error)")
+            reject(client, status: GEIST_SCK_STATUS_FAILED)
             return
         }
-
-        guard Self.respond(GEIST_SCK_STATUS_OK, to: fd) else {
+        guard self.generation == generation, writer.bind(client, initialData: response(GEIST_SCK_STATUS_OK)) else {
             await coordinator.stop()
-            Self.close(fd)
+            client.shutdown()
             return
         }
-        activeFD = fd
-        connectionGeneration &+= 1
-        let generation = connectionGeneration
-        writer.bind(fd)
-        watchForDisconnect(fd, generation: generation)
-    }
-
-    private nonisolated func watchForDisconnect(_ fd: Int32, generation: UInt64) {
+        activeConnection = client
+        await coordinator.activate()
         connectionQueue.async { [weak self] in
-            var byte: UInt8 = 0
-            _ = Darwin.read(fd, &byte, 1)
-            Task { await self?.connectionClosed(fd, generation: generation) }
+            client.waitForDisconnect()
+            Task { await self?.disconnected(client) }
         }
     }
 
-    private func connectionClosed(_ fd: Int32, generation: UInt64) async {
-        guard activeFD == fd, connectionGeneration == generation else { return }
-        activeFD = nil
-        connectionGeneration &+= 1
-        await coordinator.stop()
+    private func disconnected(_ client: CaptureConnection) {
+        enqueue {
+            await self.stopCapture(ifActive: client)
+        }
+    }
+
+    private func stopCapture(ifActive client: CaptureConnection) async {
+        guard activeConnection === client else { return }
+        await stopCapture()
+    }
+
+    private func stopCapture() async {
+        activeConnection?.shutdown()
         writer.close()
+        await coordinator.stop()
+        activeConnection = nil
+    }
+
+    private func reject(_ client: CaptureConnection, status: Int32) {
+        _ = client.write(response(status))
+        client.shutdown()
+    }
+
+    private func response(_ status: Int32) -> Data {
+        var response = geist_sck_start_response_t(magic: GEIST_SCK_WIRE_MAGIC, status: status)
+        return withUnsafeBytes(of: &response) { Data($0) }
     }
 }

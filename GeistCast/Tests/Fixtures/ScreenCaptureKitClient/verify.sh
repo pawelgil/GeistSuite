@@ -18,6 +18,8 @@ ditto "$fixture_root" "$fixture_copy"
   "$work_root/ScreenCaptureKit.framework.zip" "$package_root"
 ditto -x -k "$work_root/ScreenCaptureKit.framework.zip" "$framework_root"
 
+codesign --force --sign - "$framework_root/ScreenCaptureKit.framework"
+bundle_id="com.geistcast.tests.screencapturekit-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 configuration="$work_root/ScreenCaptureKit.xcconfig"
 printf '%s\n' \
   "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*] = \$(inherited) \"$framework_root\"" \
@@ -31,5 +33,11 @@ XCODE_XCCONFIG_FILE="$configuration" xcodebuild \
   -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$work_root/DerivedData" \
+  PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
   CODE_SIGNING_ALLOWED=NO \
   build
+
+if [[ "${1:-}" == "--smoke" ]]; then
+  swift run --package-path "$package_root" ScreenCaptureKitSmoke \
+    "$work_root/DerivedData/Build/Products/Debug-iphonesimulator/ScreenCaptureKitClient.app" "$bundle_id"
+fi

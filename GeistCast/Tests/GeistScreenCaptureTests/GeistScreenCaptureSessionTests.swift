@@ -1,3 +1,4 @@
+import CoreMedia
 import AVFoundation
 import CoreVideo
 import Darwin
@@ -20,15 +21,17 @@ struct GeistScreenCaptureSessionTests {
 
         try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: client)
 
-        #expect(try readResponse(from: client) == GEIST_SCK_STATUS_OK)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_OK)
         let pixelBuffer = try makePixelBuffer()
         screen.emit(pixelBuffer)
-        let headerData = try readExactly(FrameHeader.byteCount, from: client)
+        let headerData = try await readExactly(FrameHeader.byteCount, from: client)
         let header = try #require(FrameHeader.decode(headerData))
-        _ = try readExactly(Int(header.payloadSize), from: client)
+        _ = try await readExactly(Int(header.payloadSize), from: client)
         #expect(header.streamType == GEIST_SCK_STREAM_SCREEN)
         #expect(header.width == 2)
         #expect(header.height == 2)
+        #expect(header.timestampSeconds == 1)
+        #expect(header.timestampNanoseconds == 250_000_000)
     }
 
     @Test
@@ -42,7 +45,7 @@ struct GeistScreenCaptureSessionTests {
 
         try writeRequest(outputs: GEIST_SCK_OUTPUT_AUDIO, to: client)
 
-        #expect(try readResponse(from: client) == GEIST_SCK_STATUS_NOT_SUPPORTED)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_NOT_SUPPORTED)
     }
 
     @Test
@@ -54,13 +57,13 @@ struct GeistScreenCaptureSessionTests {
         let first = try connect(to: socketPath)
         defer { close(first) }
         try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: first)
-        #expect(try readResponse(from: first) == GEIST_SCK_STATUS_OK)
+        #expect(try await readResponse(from: first) == GEIST_SCK_STATUS_OK)
         let second = try connect(to: socketPath)
         defer { close(second) }
 
         try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: second)
 
-        #expect(try readResponse(from: second) == GEIST_SCK_STATUS_BUSY)
+        #expect(try await readResponse(from: second) == GEIST_SCK_STATUS_BUSY)
     }
 
     @Test
@@ -74,7 +77,7 @@ struct GeistScreenCaptureSessionTests {
 
         try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, magic: 0, to: client)
 
-        #expect(try readResponse(from: client) == GEIST_SCK_STATUS_INVALID_REQUEST)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_INVALID_REQUEST)
     }
 
     @Test
@@ -89,14 +92,16 @@ struct GeistScreenCaptureSessionTests {
 
         try writeRequest(outputs: GEIST_SCK_OUTPUT_MICROPHONE, to: client)
 
-        #expect(try readResponse(from: client) == GEIST_SCK_STATUS_OK)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_OK)
         try microphone.emit(makeAudioBuffer())
-        let headerData = try readExactly(FrameHeader.byteCount, from: client)
+        let headerData = try await readExactly(FrameHeader.byteCount, from: client)
         let header = try #require(FrameHeader.decode(headerData))
-        _ = try readExactly(Int(header.payloadSize), from: client)
+        _ = try await readExactly(Int(header.payloadSize), from: client)
         #expect(header.streamType == GEIST_SCK_STREAM_MICROPHONE)
         #expect(header.audioSampleRate == 48000)
         #expect(header.audioSampleCount == 16)
+        #expect(header.timestampSeconds == 2)
+        #expect(header.timestampNanoseconds == 500_000_000)
     }
 
     @Test
@@ -107,14 +112,14 @@ struct GeistScreenCaptureSessionTests {
         defer { Task { await sut.stop() } }
         let first = try connect(to: socketPath)
         try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: first)
-        #expect(try readResponse(from: first) == GEIST_SCK_STATUS_OK)
+        #expect(try await readResponse(from: first) == GEIST_SCK_STATUS_OK)
         close(first)
         let second = try connect(to: socketPath)
         defer { close(second) }
 
         try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: second)
 
-        #expect(try readResponse(from: second) == GEIST_SCK_STATUS_OK)
+        #expect(try await readResponse(from: second) == GEIST_SCK_STATUS_OK)
     }
 
     @Test
@@ -142,6 +147,89 @@ struct GeistScreenCaptureSessionTests {
 
         #expect(lstat(socketPath, &metadata) == 0)
         #expect(metadata.st_mode & 0o777 == 0o600)
+    }
+
+    @Test
+    func stop_IncompleteHandshake_DisconnectsClientAndAllowsRestart() async throws {
+        let socketPath = "/tmp/geistsck-test-\(UUID().uuidString).sock"
+        let sut = makeSUT(socketPath: socketPath)
+        try await sut.start()
+        let client = try connect(to: socketPath)
+        defer { close(client) }
+        var byte: UInt8 = 0
+        #expect(write(client, &byte, 1) == 1)
+
+        await sut.stop()
+
+        #expect(read(client, &byte, 1) <= 0)
+        try await sut.start()
+        await sut.stop()
+        #expect(!FileManager.default.fileExists(atPath: socketPath))
+    }
+
+    @Test
+    func start_ExistingListener_DoesNotReplaceIt() async throws {
+        let socketPath = "/tmp/geistsck-test-\(UUID().uuidString).sock"
+        let first = makeSUT(socketPath: socketPath)
+        let second = makeSUT(socketPath: socketPath)
+        try await first.start()
+        defer { Task { await first.stop() } }
+
+        await #expect(throws: GeistScreenCaptureSession.Error.self) { try await second.start() }
+
+        let client = try connect(to: socketPath)
+        defer { close(client) }
+        try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: client)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_OK)
+        await first.stop()
+    }
+
+    @Test
+    func stop_ConcurrentRequests_NoCaptureSurvivesRestart() async throws {
+        let socketPath = "/tmp/geistsck-test-\(UUID().uuidString).sock"
+        let sut = makeSUT(socketPath: socketPath)
+        try await sut.start()
+        let clients = try (0..<8).map { _ in try connect(to: socketPath) }
+        defer { clients.forEach { close($0) } }
+        for client in clients { try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: client) }
+
+        async let firstStop: Void = sut.stop()
+        async let secondStop: Void = sut.stop()
+        _ = await (firstStop, secondStop)
+        try await sut.start()
+        let client = try connect(to: socketPath)
+        defer { close(client) }
+        try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: client)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_OK)
+        await sut.stop()
+    }
+
+    @Test
+    func start_StaleSocket_ReclaimsSocketAndAcceptsClient() async throws {
+        let path = "/tmp/geistsck-test-\(UUID().uuidString).sock"
+        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+        try #require(descriptor >= 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { bytes in
+            path.utf8CString.withUnsafeBytes { bytes.copyBytes(from: $0) }
+        }
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        close(descriptor)
+        defer { unlink(path) }
+        try #require(result == 0)
+        let sut = makeSUT(socketPath: path)
+
+        try await sut.start()
+        let client = try connect(to: path)
+        defer { close(client) }
+        try writeRequest(outputs: GEIST_SCK_OUTPUT_SCREEN, to: client)
+        #expect(try await readResponse(from: client) == GEIST_SCK_STATUS_OK)
+        await sut.stop()
     }
 
     private func makeSUT(
@@ -201,8 +289,8 @@ struct GeistScreenCaptureSessionTests {
         }
     }
 
-    private func readResponse(from fd: Int32) throws -> Int32 {
-        let data = try readExactly(
+    private func readResponse(from fd: Int32) async throws -> Int32 {
+        let data = try await readExactly(
             MemoryLayout<geist_sck_start_response_t>.size,
             from: fd
         )
@@ -213,20 +301,24 @@ struct GeistScreenCaptureSessionTests {
         return response.status
     }
 
-    private func readExactly(_ count: Int, from fd: Int32) throws -> Data {
-        var data = Data(count: count)
-        let result = data.withUnsafeMutableBytes { bytes -> Int in
-            guard let base = bytes.baseAddress else { return 0 }
-            var offset = 0
-            while offset < count {
-                let readCount = read(fd, base.advanced(by: offset), count - offset)
-                guard readCount > 0 else { return -1 }
-                offset += readCount
+    private func readExactly(_ count: Int, from fd: Int32) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                var data = Data(count: count)
+                let result = data.withUnsafeMutableBytes { bytes -> Int in
+                    guard let base = bytes.baseAddress else { return 0 }
+                    var offset = 0
+                    while offset < count {
+                        let readCount = read(fd, base.advanced(by: offset), count - offset)
+                        guard readCount > 0 else { return -1 }
+                        offset += readCount
+                    }
+                    return offset
+                }
+                if result == count { continuation.resume(returning: data) }
+                else { continuation.resume(throwing: SocketTestError.failed) }
             }
-            return offset
         }
-        guard result == count else { throw SocketTestError.failed }
-        return data
     }
 
     private func makePixelBuffer() throws -> CVPixelBuffer {
@@ -261,13 +353,9 @@ private enum SocketTestError: Swift.Error {
 }
 
 private final class ControllableScreenCapture: ScreenFrameCapturing {
-    // MARK: Properties
+    private let handler = Mutex<(@Sendable (CVPixelBuffer, CMTime) -> Void)?>(nil)
 
-    private let handler = Mutex<(@Sendable (CVPixelBuffer) -> Void)?>(nil)
-
-    // MARK: Functions
-
-    func start(delivering handler: @escaping @Sendable (CVPixelBuffer) -> Void) throws {
+    func start(delivering handler: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
         self.handler.withLock { $0 = handler }
     }
 
@@ -276,18 +364,14 @@ private final class ControllableScreenCapture: ScreenFrameCapturing {
     }
 
     func emit(_ frame: CVPixelBuffer) {
-        handler.withLock { $0 }?(frame)
+        handler.withLock { $0 }?(frame, CMTime(seconds: 1.25, preferredTimescale: 1000))
     }
 }
 
 private final class ControllableMicrophoneCapture: MicrophoneCapturing {
-    // MARK: Properties
+    private let handler = Mutex<(@Sendable (AVAudioPCMBuffer, CMTime) -> Void)?>(nil)
 
-    private let handler = Mutex<(@Sendable (AVAudioPCMBuffer) -> Void)?>(nil)
-
-    // MARK: Functions
-
-    func start(delivering handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    func start(delivering handler: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) throws {
         self.handler.withLock { $0 = handler }
     }
 
@@ -296,16 +380,16 @@ private final class ControllableMicrophoneCapture: MicrophoneCapturing {
     }
 
     func emit(_ buffer: AVAudioPCMBuffer) {
-        handler.withLock { $0 }?(buffer)
+        handler.withLock { $0 }?(buffer, CMTime(seconds: 2.5, preferredTimescale: 1000))
     }
 }
 
 private struct DummySessionScreenCapture: ScreenFrameCapturing {
-    func start(delivering _: @escaping @Sendable (CVPixelBuffer) -> Void) throws {}
+    func start(delivering _: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {}
     func stop() {}
 }
 
 private struct DummySessionMicrophoneCapture: MicrophoneCapturing {
-    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {}
+    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) throws {}
     func stop() {}
 }

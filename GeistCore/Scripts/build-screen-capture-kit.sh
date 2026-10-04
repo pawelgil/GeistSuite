@@ -15,6 +15,7 @@ if [ ! -d "$source_framework/Headers" ]; then
 fi
 
 rm -rf "$work_root"
+trap 'rm -rf "$work_root"' EXIT HUP INT TERM
 mkdir -p "$framework/Headers" "$framework/Modules/ScreenCaptureKit.swiftmodule" "$work_root/Objects"
 cp -R "$source_framework/Headers/." "$framework/Headers/"
 cp "$source_framework/Modules/module.modulemap" "$framework/Modules/module.modulemap"
@@ -37,20 +38,19 @@ for arch in arm64 x86_64; do
     target="$arch-apple-ios27.0-simulator"
     objects="$work_root/Objects/$arch"
     mkdir -p "$objects"
-    xcrun --sdk iphonesimulator clang \
-        -arch "$arch" -target "$target" -fobjc-arc -fmodules -Wno-availability \
-        -F "$source_framework/.." \
+    for source in "$package_root"/GeistCast/Sources/ScreenCaptureKitSimulator/*.m; do
+        name="$(basename "$source" .m)"
+        xcrun --sdk iphonesimulator clang \
+            -arch "$arch" -target "$target" -fobjc-arc -fmodules -Wno-availability \
+            -F "$source_framework/.." \
+            -I "$package_root/GeistCast/Sources/GeistScreenCaptureShimCore/include" \
+            -I "$package_root/GeistCore/Sources/SharedShimCore/include" \
+            -c "$source" -o "$objects/$name.o"
+    done
+    xcrun --sdk iphonesimulator clang -arch "$arch" -target "$target" \
         -I "$package_root/GeistCast/Sources/GeistScreenCaptureShimCore/include" \
-        -I "$package_root/GeistCore/Sources/SharedShimCore/include" \
-        -c "$package_root/GeistCast/Sources/ScreenCaptureKitSimulator/Runtime.m" \
-        -o "$objects/Runtime.o"
-    xcrun --sdk iphonesimulator clang \
-        -arch "$arch" -target "$target" -fobjc-arc -fmodules -Wno-availability \
-        -F "$source_framework/.." \
-        -I "$package_root/GeistCast/Sources/GeistScreenCaptureShimCore/include" \
-        -I "$package_root/GeistCore/Sources/SharedShimCore/include" \
-        -c "$package_root/GeistCast/Sources/ScreenCaptureKitSimulator/FrameSocket.m" \
-        -o "$objects/FrameSocket.o"
+        -c "$package_root/GeistCast/Sources/GeistScreenCaptureShimCore/FrameValidation.c" \
+        -o "$objects/FrameValidation.o"
     xcrun --sdk iphonesimulator clang -arch "$arch" -target "$target" \
         -I "$package_root/GeistCore/Sources/SharedShimCore/include" \
         -c "$package_root/GeistCore/Sources/SharedShimCore/SocketIO.c" \
@@ -75,10 +75,7 @@ for arch in arm64 x86_64; do
         -target "$target" \
         -sdk "$simulator_sdk" \
         -emit-library \
-        "$objects/Runtime.o" \
-        "$objects/FrameSocket.o" \
-        "$objects/SocketIO.o" \
-        "$objects/Overlay.o" \
+        "$objects/"*.o \
         -framework Foundation \
         -framework UIKit \
         -framework CoreMedia \
@@ -94,5 +91,5 @@ xcrun lipo -create \
     "$work_root/Objects/x86_64/ScreenCaptureKit" \
     -output "$framework/ScreenCaptureKit"
 
-rm -f "$output_zip"
-ditto -c -k --norsrc --keepParent "$framework" "$output_zip"
+ditto -c -k --norsrc --keepParent "$framework" "$work_root/framework.zip"
+mv -f "$work_root/framework.zip" "$output_zip"

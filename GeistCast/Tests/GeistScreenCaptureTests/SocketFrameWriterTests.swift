@@ -6,6 +6,36 @@ import Testing
 
 struct SocketFrameWriterTests {
     @Test
+    func write_UnresponsiveClient_DisconnectsWithinDeadline() throws {
+        var sockets: [Int32] = [0, 0]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        defer { Darwin.close(sockets[1]) }
+        let sut = SocketFrameWriter()
+        sut.bind(CaptureConnection(sockets[0]))
+        let start = ContinuousClock.now
+
+        sut.write(Data(repeating: 0xA5, count: 8 * 1024 * 1024))
+
+        #expect(start.duration(to: .now) < .seconds(1))
+        var bytes = [UInt8](repeating: 0, count: 16384)
+        var count = 0
+        repeat { count = Darwin.read(sockets[1], &bytes, bytes.count) } while count > 0
+        #expect(count == 0)
+    }
+
+    @Test
+    func write_DisconnectedClient_DoesNotRaiseSIGPIPE() throws {
+        var sockets: [Int32] = [0, 0]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        let sut = SocketFrameWriter()
+        sut.bind(CaptureConnection(sockets[0]))
+        Darwin.close(sockets[1])
+
+        sut.write(Data([1]))
+        sut.close()
+    }
+
+    @Test
     func write_LargePayloadWithBackpressure_DeliversCompleteData() {
         var sockets: [Int32] = [0, 0]
         #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
@@ -34,7 +64,7 @@ struct SocketFrameWriterTests {
             finished.signal()
         }
         let sut = SocketFrameWriter()
-        sut.bind(sockets[0])
+        sut.bind(CaptureConnection(sockets[0]))
 
         sut.write(expected)
         sut.close()

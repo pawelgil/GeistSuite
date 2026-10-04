@@ -86,21 +86,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 self?.stopBroadcast(simulatorUDID: sim, bundleID: bundle)
             },
             toggleScreenCaptureKitSupport: { [weak self] in
-                self?.toggleScreenCaptureKitSupport()
+                self?.screenCaptureKitSupport.toggle()
             }
         )
     )
     private let dylibPath: String?
-    private let screenCaptureKitInstaller: ScreenCaptureKitSupportInstaller
+    private let screenCaptureKitSupport: ScreenCaptureKitSupport
     private var cachedEntries: [SimulatorApps] = []
     private var sessions: [SessionKey: GeistBroadcastSession] = [:]
     private var streamingKeys: Set<SessionKey> = []
     private var inFlightKeys: Set<SessionKey> = []
     private var injectedSimulators: Set<String> = []
-    private var bootedSimulatorUDIDs: Set<String> = []
-    private var screenCaptureKitCompatibilityEnabled = false
-    private var screenCaptureKitSessions: [String: GeistScreenCaptureSession] = [:]
-    private var screenCaptureKitTransition: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
 
     // MARK: Lifecycle
@@ -110,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let listing = ProcessBootedSimulatorsListing(process: process)
         self.listing = listing
         injector = LaunchctlShimInjector(process: process)
-        screenCaptureKitInstaller = ScreenCaptureKitSupportInstaller(process: process)
+        screenCaptureKitSupport = ScreenCaptureKitSupport(installer: ScreenCaptureKitSupportInstaller(process: process))
         dylibPath = (try? DylibInstaller.installIfNeeded())
         if dylibPath == nil {
             log.warn("DylibInstaller failed; auto-injection disabled.")
@@ -141,11 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         requestEagerPermissions()
         startCatalogPolling()
         startSimulatorWatching()
-        if globals.screenCaptureKitSupportEnabled {
-            enqueueScreenCaptureKitTransition {
-                await self.enableScreenCaptureKitSupport(showConfirmation: false)
-            }
-        }
+        screenCaptureKitSupport.restore()
     }
 
     func applicationWillTerminate(_: Notification) {
@@ -155,7 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         simulatorWatcher?.stop()
         pollTask?.cancel()
         let sessionList = Array(sessions.values)
-        let screenCaptureKitSessionList = Array(screenCaptureKitSessions.values)
+        let screenCaptureKitSessionList = screenCaptureKitSupport.prepareForTermination()
         let injectedList = Array(injectedSimulators)
         let dylib = dylibPath
         let injector = self.injector
@@ -329,128 +321,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     private func handleSimulatorChange(added: Set<String>, removed: Set<String>) {
-        bootedSimulatorUDIDs.formUnion(added)
-        bootedSimulatorUDIDs.subtract(removed)
+        screenCaptureKitSupport.updateSimulators(added: added, removed: removed)
         for udid in added {
             log.notice("simulator booted: \(udid)")
             Task {
                 await self.injectIfNeeded(simulator: udid)
-                self.enqueueScreenCaptureKitTransition {
-                    await self.startScreenCaptureKitSessionIfNeeded(simulator: udid)
-                }
             }
         }
         for udid in removed {
             log.notice("simulator shutdown: \(udid)")
             Task {
                 await self.removeSessions(for: udid)
-                self.enqueueScreenCaptureKitTransition {
-                    await self.removeScreenCaptureKitSession(for: udid)
-                }
             }
         }
-    }
-
-    private func toggleScreenCaptureKitSupport() {
-        if globals.screenCaptureKitSupportEnabled {
-            enqueueScreenCaptureKitTransition {
-                await self.disableScreenCaptureKitSupport()
-            }
-        } else {
-            enqueueScreenCaptureKitTransition {
-                await self.enableScreenCaptureKitSupport(showConfirmation: true)
-            }
-        }
-    }
-
-    private func enqueueScreenCaptureKitTransition(
-        _ operation: @escaping @MainActor @Sendable () async -> Void
-    ) {
-        let previous = screenCaptureKitTransition
-        screenCaptureKitTransition = Task {
-            await previous?.value
-            guard !Task.isCancelled else { return }
-            await operation()
-        }
-    }
-
-    private func enableScreenCaptureKitSupport(showConfirmation: Bool) async {
-        do {
-            switch try await screenCaptureKitInstaller.enable() {
-            case .compatibilityFramework:
-                globals.screenCaptureKitSupportEnabled = true
-                screenCaptureKitCompatibilityEnabled = true
-                for simulator in bootedSimulatorUDIDs {
-                    await startScreenCaptureKitSessionIfNeeded(simulator: simulator)
-                }
-                if showConfirmation { showXcodeRestartAlert() }
-            case .nativeSDK:
-                globals.screenCaptureKitSupportEnabled = true
-                screenCaptureKitCompatibilityEnabled = false
-                if showConfirmation { showNativeScreenCaptureKitAlert() }
-            }
-        } catch {
-            log.error("ScreenCaptureKit support failed: \(error)")
-            do {
-                try await screenCaptureKitInstaller.disable()
-                globals.screenCaptureKitSupportEnabled = false
-            } catch {
-                globals.screenCaptureKitSupportEnabled = true
-                log.warn("ScreenCaptureKit support rollback failed: \(error)")
-            }
-        }
-    }
-
-    private func disableScreenCaptureKitSupport() async {
-        do {
-            try await screenCaptureKitInstaller.disable()
-            globals.screenCaptureKitSupportEnabled = false
-            let activeSessions = Array(screenCaptureKitSessions.values)
-            screenCaptureKitSessions.removeAll()
-            screenCaptureKitCompatibilityEnabled = false
-            for session in activeSessions {
-                await session.stop()
-            }
-        } catch {
-            globals.screenCaptureKitSupportEnabled = true
-            log.warn("ScreenCaptureKit support disable failed: \(error)")
-        }
-    }
-
-    private func startScreenCaptureKitSessionIfNeeded(simulator: String) async {
-        guard screenCaptureKitCompatibilityEnabled,
-              screenCaptureKitSessions[simulator] == nil,
-              let simulatorID = UUID(uuidString: simulator)
-        else { return }
-        do {
-            let session = try GeistScreenCaptureSession(simulator: simulatorID)
-            try await session.start()
-            screenCaptureKitSessions[simulator] = session
-            log.notice("ScreenCaptureKit session started: \(simulator)")
-        } catch {
-            log.warn("ScreenCaptureKit session failed for \(simulator): \(error)")
-        }
-    }
-
-    private func removeScreenCaptureKitSession(for simulator: String) async {
-        guard let session = screenCaptureKitSessions.removeValue(forKey: simulator) else { return }
-        await session.stop()
-    }
-
-    private func showXcodeRestartAlert() {
-        let alert = NSAlert()
-        alert.messageText = "ScreenCaptureKit Simulator Support Enabled"
-        alert.informativeText = "Restart Xcode once. Existing projects can then import ScreenCaptureKit for simulator builds without project changes."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
-    private func showNativeScreenCaptureKitAlert() {
-        let alert = NSAlert()
-        alert.messageText = "Native ScreenCaptureKit Simulator Support Available"
-        alert.informativeText = "GeistCast removed its compatibility override. Restart Xcode once to use the framework included with the selected SDK."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
     }
 
     private func injectIfNeeded(simulator: String) async {

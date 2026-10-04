@@ -1,12 +1,9 @@
+import CoreMedia
 import Foundation
 import GeistScreenCaptureShimCore
 
 struct FrameHeader: Equatable {
-    // MARK: Static Properties
-
     static let byteCount = MemoryLayout<geist_sck_frame_header_t>.size
-
-    // MARK: Properties
 
     let streamType: UInt32
     let pixelFormatFourCC: UInt32
@@ -20,8 +17,8 @@ struct FrameHeader: Equatable {
     let audioInterleaved: UInt32
     let audioSampleCount: UInt32
     let payloadSize: UInt32
-
-    // MARK: Lifecycle
+    let timestampSeconds: UInt32
+    let timestampNanoseconds: UInt32
 
     init(
         streamType: UInt32,
@@ -35,7 +32,8 @@ struct FrameHeader: Equatable {
         audioSampleFormat: UInt32 = 0,
         audioInterleaved: UInt32 = 0,
         audioSampleCount: UInt32 = 0,
-        payloadSize: UInt32
+        payloadSize: UInt32,
+        presentationTime: CMTime = .zero
     ) {
         self.streamType = streamType
         self.pixelFormatFourCC = pixelFormatFourCC
@@ -49,6 +47,9 @@ struct FrameHeader: Equatable {
         self.audioInterleaved = audioInterleaved
         self.audioSampleCount = audioSampleCount
         self.payloadSize = payloadSize
+        let nanoseconds = CMTimeConvertScale(presentationTime, timescale: 1_000_000_000, method: .default).value
+        timestampSeconds = UInt32(clamping: max(0, nanoseconds) / 1_000_000_000)
+        timestampNanoseconds = UInt32(max(0, nanoseconds) % 1_000_000_000)
     }
 
     private init(raw: geist_sck_frame_header_t) {
@@ -64,9 +65,9 @@ struct FrameHeader: Equatable {
         audioInterleaved = raw.audioInterleaved
         audioSampleCount = raw.audioSampleCount
         payloadSize = raw.payloadSize
+        timestampSeconds = raw.timestampSeconds
+        timestampNanoseconds = raw.timestampNanoseconds
     }
-
-    // MARK: Static Functions
 
     static func decode(_ data: Data) -> FrameHeader? {
         guard data.count >= byteCount else { return nil }
@@ -76,8 +77,6 @@ struct FrameHeader: Equatable {
         guard raw.magic == GEIST_SCK_WIRE_MAGIC else { return nil }
         return FrameHeader(raw: raw)
     }
-
-    // MARK: Functions
 
     func encode() -> Data {
         var raw = geist_sck_frame_header_t(
@@ -93,7 +92,9 @@ struct FrameHeader: Equatable {
             audioSampleFormat: audioSampleFormat,
             audioInterleaved: audioInterleaved,
             audioSampleCount: audioSampleCount,
-            payloadSize: payloadSize
+            payloadSize: payloadSize,
+            timestampSeconds: timestampSeconds,
+            timestampNanoseconds: timestampNanoseconds
         )
         return withUnsafeBytes(of: &raw) { Data($0) }
     }

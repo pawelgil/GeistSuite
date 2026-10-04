@@ -4,296 +4,180 @@ import Testing
 
 struct ScreenCaptureKitSupportInstallerTests {
     @Test
-    func enable_CompatibilityFramework_StagesAndActivatesFramework() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let paths = makePaths(root: temporary.path)
-        let sdk = temporary.appending(path: "Simulator.sdk")
-        try FileManager.default.createDirectory(at: sdk, withIntermediateDirectories: true)
-        let process = ScreenCaptureKitInstallerProcess(
-            sdkPath: sdk.path,
-            xcodeConfiguration: "",
-            extractsFramework: true
-        )
-        let sut = ScreenCaptureKitSupportInstaller(process: process, paths: paths)
+    func enable_CompatibilityFramework_PreservesIncludeAcrossRepeatedEnableAndDisable() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let environment = FakeBuildEnvironment(sdkPath: fixture.sdk.path, configuration: "/Projects/Base.xcconfig")
+        let sut = ScreenCaptureKitSupportInstaller(environment: environment,
+            framework: DummyFrameworkInstaller(), paths: fixture.paths)
 
-        let result = try await sut.enable()
+        #expect(try await sut.enable() == .compatibilityFramework)
+        #expect(try await sut.enable() == .compatibilityFramework)
 
-        #expect(result == .compatibilityFramework)
-        #expect(FileManager.default.fileExists(atPath: paths.frameworkPath))
-        #expect(FileManager.default.fileExists(atPath: paths.configurationPath))
-        #expect(await process.invocations.last == .init(
-            executable: "/bin/launchctl",
-            arguments: ["setenv", "XCODE_XCCONFIG_FILE", paths.configurationPath]
-        ))
+        #expect(await environment.configuration() == fixture.paths.configurationPath)
+        let contents = try String(contentsOfFile: fixture.paths.configurationPath, encoding: .utf8)
+        #expect(contents.hasPrefix("#include? \"/Projects/Base.xcconfig\"\n"))
+        try await sut.disable()
+        #expect(await environment.configuration() == "/Projects/Base.xcconfig")
     }
 
     @Test
-    func enable_CodeSigningFails_PreservesInstalledFramework() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let paths = makePaths(root: temporary.path)
-        let existing = URL(fileURLWithPath: paths.frameworkPath)
-        try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
-        let marker = existing.appending(path: "existing")
-        try Data().write(to: marker)
-        let sdk = temporary.appending(path: "Simulator.sdk")
-        try FileManager.default.createDirectory(at: sdk, withIntermediateDirectories: true)
-        let process = ScreenCaptureKitInstallerProcess(
-            sdkPath: sdk.path,
-            xcodeConfiguration: "",
-            extractsFramework: true,
-            failsCodeSigning: true
-        )
-        let sut = ScreenCaptureKitSupportInstaller(process: process, paths: paths)
+    func enable_FrameworkInstallationFails_PreservesEnvironment() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let environment = FakeBuildEnvironment(sdkPath: fixture.sdk.path, configuration: "/Projects/Base.xcconfig")
+        let sut = ScreenCaptureKitSupportInstaller(environment: environment,
+            framework: StubFailingFrameworkInstaller(), paths: fixture.paths)
 
-        await #expect(throws: ScreenCaptureKitInstallerProcess.Error.codeSigning) {
-            try await sut.enable()
-        }
+        await #expect(throws: InstallerFailure.expected) { try await sut.enable() }
 
-        #expect(FileManager.default.fileExists(atPath: marker.path))
+        #expect(await environment.configuration() == "/Projects/Base.xcconfig")
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.configurationPath))
     }
 
     @Test
-    func enable_ExistingFramework_ReplacesItAfterStagedFrameworkIsReady() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let paths = makePaths(root: temporary.path)
-        let existing = URL(fileURLWithPath: paths.frameworkPath)
-        try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
-        try Data().write(to: existing.appending(path: "old"))
-        let sdk = temporary.appending(path: "Simulator.sdk")
-        try FileManager.default.createDirectory(at: sdk, withIntermediateDirectories: true)
-        let process = ScreenCaptureKitInstallerProcess(
-            sdkPath: sdk.path,
-            xcodeConfiguration: "",
-            extractsFramework: true
-        )
-        let sut = ScreenCaptureKitSupportInstaller(process: process, paths: paths)
+    func enable_ActivationFails_RestoresPreviousConfigurationContents() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let expected = Data("original".utf8)
+        try expected.write(to: URL(fileURLWithPath: fixture.paths.configurationPath))
+        let sut = ScreenCaptureKitSupportInstaller(
+            environment: StubFailingBuildEnvironment(sdkPath: fixture.sdk.path),
+            framework: DummyFrameworkInstaller(), paths: fixture.paths)
 
-        _ = try await sut.enable()
+        await #expect(throws: InstallerFailure.expected) { try await sut.enable() }
 
-        #expect(!FileManager.default.fileExists(atPath: existing.appending(path: "old").path))
-        #expect(FileManager.default.fileExists(atPath: existing.appending(path: "new").path))
-        #expect(await process.invocations.last == .init(
-            executable: "/bin/launchctl",
-            arguments: ["setenv", "XCODE_XCCONFIG_FILE", paths.configurationPath]
-        ))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.paths.configurationPath)) == expected)
     }
 
     @Test
-    func enable_NativeFrameworkAvailable_DisablesCompatibilityOverride() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let paths = makePaths(root: temporary.path)
-        let sdk = temporary.appending(path: "Simulator.sdk")
-        let nativeFramework = sdk.appending(
-            path: "System/Library/Frameworks/ScreenCaptureKit.framework"
-        )
+    func enable_NativeFrameworkAvailable_RemovesCompatibilityOverride() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
         try FileManager.default.createDirectory(
-            at: nativeFramework,
-            withIntermediateDirectories: true
-        )
-        let process = ScreenCaptureKitInstallerProcess(
-            sdkPath: sdk.path,
-            xcodeConfiguration: paths.configurationPath
-        )
-        let sut = ScreenCaptureKitSupportInstaller(process: process, paths: paths)
+            at: fixture.sdk.appending(path: "System/Library/Frameworks/ScreenCaptureKit.framework"),
+            withIntermediateDirectories: true)
+        let environment = FakeBuildEnvironment(sdkPath: fixture.sdk.path, configuration: fixture.paths.configurationPath)
+        let sut = ScreenCaptureKitSupportInstaller(environment: environment,
+            framework: StubFailingFrameworkInstaller(), paths: fixture.paths)
 
-        let result = try await sut.enable()
+        #expect(try await sut.enable() == .nativeSDK)
 
-        #expect(result == .nativeSDK)
-        #expect(await process.invocations.last == .init(
-            executable: "/bin/launchctl",
-            arguments: ["unsetenv", "XCODE_XCCONFIG_FILE"]
-        ))
-    }
-
-    @Test
-    func enable_RepeatedInstallations_UseUniqueStagingDirectories() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appending(path: UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let paths = makePaths(root: temporary.path)
-        let sdk = temporary.appending(path: "Simulator.sdk")
-        try FileManager.default.createDirectory(at: sdk, withIntermediateDirectories: true)
-        let process = ScreenCaptureKitInstallerProcess(
-            sdkPath: sdk.path,
-            xcodeConfiguration: "",
-            extractsFramework: true
-        )
-        let sut = ScreenCaptureKitSupportInstaller(process: process, paths: paths)
-
-        _ = try await sut.enable()
-        _ = try await sut.enable()
-
-        let destinations = await process.invocations.compactMap { invocation in
-            invocation.executable == "/usr/bin/ditto" ? invocation.arguments.last : nil
-        }
-        #expect(destinations.count == 2)
-        #expect(Set(destinations).count == 2)
-    }
-
-    @Test
-    func configuration_NoExistingConfig_AddsSimulatorOnlyFrameworkSearchPath() {
-        let result = ScreenCaptureKitSupportInstaller.configuration(
-            existingConfiguration: "",
-            frameworkDirectory: "/Library/Application Support/GeistCast"
-        )
-
-        #expect(result == """
-        FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*] = $(inherited) \"/Library/Application Support/GeistCast\"
-        LD_RUNPATH_SEARCH_PATHS[sdk=iphonesimulator*] = $(inherited) \"/Library/Application Support/GeistCast\"
-
-        """)
-    }
-
-    @Test
-    func configuration_ExistingConfig_IncludesItBeforeCompatibilitySetting() {
-        let result = ScreenCaptureKitSupportInstaller.configuration(
-            existingConfiguration: "/Projects/Base Config.xcconfig",
-            frameworkDirectory: "/Frameworks"
-        )
-
-        #expect(result == """
-        #include? \"/Projects/Base Config.xcconfig\"
-        FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*] = $(inherited) \"/Frameworks\"
-        LD_RUNPATH_SEARCH_PATHS[sdk=iphonesimulator*] = $(inherited) \"/Frameworks\"
-
-        """)
-    }
-
-    @Test
-    func inheritedConfiguration_OwnConfigActive_PreservesInstalledInclude() {
-        let result = ScreenCaptureKitSupportInstaller.inheritedConfiguration(
-            active: ScreenCaptureKitSupportInstaller.configurationPath,
-            installed: "/Projects/Base.xcconfig"
-        )
-
-        #expect(result == "/Projects/Base.xcconfig")
-    }
-
-    @Test
-    func disable_OwnConfigurationActive_UnsetsXcodeOverride() async throws {
-        let process = ScreenCaptureKitInstallerProcess(
-            xcodeConfiguration: ScreenCaptureKitSupportInstaller.configurationPath
-        )
-        let sut = ScreenCaptureKitSupportInstaller(
-            process: process,
-            installedConfiguration: { nil }
-        )
-
-        try await sut.disable()
-
-        #expect(await process.invocations == [
-            .init(
-                executable: "/bin/launchctl",
-                arguments: ["getenv", "XCODE_XCCONFIG_FILE"]
-            ),
-            .init(
-                executable: "/bin/launchctl",
-                arguments: ["unsetenv", "XCODE_XCCONFIG_FILE"]
-            ),
-        ])
-    }
-
-    @Test
-    func disable_OwnConfigurationWithIncludedConfig_RestoresPreviousOverride() async throws {
-        let process = ScreenCaptureKitInstallerProcess(
-            xcodeConfiguration: ScreenCaptureKitSupportInstaller.configurationPath
-        )
-        let sut = ScreenCaptureKitSupportInstaller(
-            process: process,
-            installedConfiguration: { "/Projects/Other.xcconfig" }
-        )
-
-        try await sut.disable()
-
-        #expect(await process.invocations.last == .init(
-            executable: "/bin/launchctl",
-            arguments: ["setenv", "XCODE_XCCONFIG_FILE", "/Projects/Other.xcconfig"]
-        ))
+        #expect(await environment.configuration().isEmpty)
     }
 
     @Test
     func disable_DifferentConfigurationActive_PreservesIt() async throws {
-        let process = ScreenCaptureKitInstallerProcess(
-            xcodeConfiguration: "/Projects/Other.xcconfig"
-        )
-        let sut = ScreenCaptureKitSupportInstaller(process: process)
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let environment = FakeBuildEnvironment(sdkPath: fixture.sdk.path, configuration: "/Projects/Other.xcconfig")
+        let sut = ScreenCaptureKitSupportInstaller(environment: environment,
+            framework: DummyFrameworkInstaller(), paths: fixture.paths)
 
         try await sut.disable()
 
-        #expect(await process.invocations.count == 1)
+        #expect(await environment.configuration() == "/Projects/Other.xcconfig")
     }
 
-    private func makePaths(root: String) -> ScreenCaptureKitSupportInstaller.Paths {
-        .init(
-            configurationPath: (root as NSString).appendingPathComponent("ScreenCaptureKit.xcconfig"),
-            frameworkPath: (root as NSString).appendingPathComponent("ScreenCaptureKit.framework"),
-            installRoot: root
-        )
+    @Test
+    func configuration_NoExistingConfig_AddsSimulatorOnlySearchPaths() {
+        let result = ScreenCaptureKitSupportInstaller.configuration(
+            existingConfiguration: "", frameworkDirectory: "/Library/Application Support/GeistCast")
+
+        #expect(result == """
+        FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*] = $(inherited) "/Library/Application Support/GeistCast"
+        LD_RUNPATH_SEARCH_PATHS[sdk=iphonesimulator*] = $(inherited) "/Library/Application Support/GeistCast"
+
+        """)
+    }
+
+    @Test
+    func install_ExistingFramework_ReplacesAndSignsWithoutLeavingStagingFiles() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let framework = URL(fileURLWithPath: fixture.paths.frameworkPath)
+        try FileManager.default.createDirectory(at: framework, withIntermediateDirectories: true)
+        try Data().write(to: framework.appending(path: "old"))
+        let sut = ScreenCaptureKitFrameworkInstaller(process: LiveProcess())
+
+        try await sut.install(at: fixture.paths)
+        try await sut.install(at: fixture.paths)
+
+        #expect(!FileManager.default.fileExists(atPath: framework.appending(path: "old").path))
+        #expect(FileManager.default.fileExists(atPath: framework.appending(path: "ScreenCaptureKit").path))
+        _ = try await LiveProcess().run(executable: "/usr/bin/codesign", arguments: ["--verify", "--strict", framework.path])
+        let files = try FileManager.default.contentsOfDirectory(atPath: fixture.root.path)
+        #expect(!files.contains { $0.hasPrefix(".ScreenCaptureKit-") })
+    }
+
+    @Test
+    func install_CodeSigningFails_PreservesInstalledFrameworkAndRemovesStagingFiles() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let framework = URL(fileURLWithPath: fixture.paths.frameworkPath)
+        try FileManager.default.createDirectory(at: framework, withIntermediateDirectories: true)
+        let marker = framework.appending(path: "existing")
+        try Data().write(to: marker)
+        let sut = ScreenCaptureKitFrameworkInstaller(process: StubSigningFailureProcess())
+
+        await #expect(throws: InstallerFailure.expected) { try await sut.install(at: fixture.paths) }
+
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+        let files = try FileManager.default.contentsOfDirectory(atPath: fixture.root.path)
+        #expect(!files.contains { $0.hasPrefix(".ScreenCaptureKit-") })
     }
 }
 
-private struct ScreenCaptureKitInstallerInvocation: Equatable {
-    let executable: String
-    let arguments: [String]
-}
+private struct Fixture {
+    let root: URL
+    let sdk: URL
+    let paths: ScreenCaptureKitSupportInstaller.Paths
 
-private actor ScreenCaptureKitInstallerProcess: ProcessRunning {
-    // MARK: Nested Types
-
-    enum Error: Swift.Error {
-        case codeSigning
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        sdk = root.appending(path: "Simulator.sdk")
+        paths = .init(configurationPath: root.appending(path: "ScreenCaptureKit.xcconfig").path,
+                      frameworkPath: root.appending(path: "ScreenCaptureKit.framework").path, installRoot: root.path)
+        try FileManager.default.createDirectory(at: sdk, withIntermediateDirectories: true)
     }
 
-    // MARK: Properties
+    func remove() { try? FileManager.default.removeItem(at: root) }
+}
 
-    private(set) var invocations: [ScreenCaptureKitInstallerInvocation] = []
+private actor FakeBuildEnvironment: ScreenCaptureKitBuildEnvironment {
+    let sdkPath: String
+    private var activeConfiguration: String
 
-    private let extractsFramework: Bool
-    private let failsCodeSigning: Bool
-    private let sdkPath: String
-    private let xcodeConfiguration: String
-
-    // MARK: Lifecycle
-
-    init(
-        sdkPath: String = "",
-        xcodeConfiguration: String,
-        extractsFramework: Bool = false,
-        failsCodeSigning: Bool = false
-    ) {
+    init(sdkPath: String, configuration: String) {
         self.sdkPath = sdkPath
-        self.xcodeConfiguration = xcodeConfiguration
-        self.extractsFramework = extractsFramework
-        self.failsCodeSigning = failsCodeSigning
+        activeConfiguration = configuration
     }
 
-    // MARK: Functions
+    func simulatorSDKPath() -> String { sdkPath }
+    func configuration() -> String { activeConfiguration }
+    func setConfiguration(_ path: String) { activeConfiguration = path }
+}
 
-    func run(executable: String, arguments: [String]) async throws -> Data {
-        invocations.append(.init(executable: executable, arguments: arguments))
-        if arguments == ["--sdk", "iphonesimulator", "--show-sdk-path"] {
-            return Data(sdkPath.utf8)
-        }
-        if arguments == ["getenv", "XCODE_XCCONFIG_FILE"] {
-            return Data(xcodeConfiguration.utf8)
-        }
-        if executable == "/usr/bin/ditto", extractsFramework, let destination = arguments.last {
-            let framework = (destination as NSString)
-                .appendingPathComponent("ScreenCaptureKit.framework")
-            try FileManager.default.createDirectory(atPath: framework, withIntermediateDirectories: true)
-            try Data().write(to: URL(fileURLWithPath: framework).appending(path: "new"))
-        }
-        if executable == "/usr/bin/codesign", failsCodeSigning {
-            throw Error.codeSigning
-        }
+private struct DummyFrameworkInstaller: ScreenCaptureKitFrameworkInstalling {
+    func install(at _: ScreenCaptureKitSupportInstaller.Paths) async throws {}
+}
+
+private enum InstallerFailure: Error { case expected }
+
+private struct StubFailingFrameworkInstaller: ScreenCaptureKitFrameworkInstalling {
+    func install(at _: ScreenCaptureKitSupportInstaller.Paths) async throws { throw InstallerFailure.expected }
+}
+
+private struct StubFailingBuildEnvironment: ScreenCaptureKitBuildEnvironment {
+    let sdkPath: String
+    func simulatorSDKPath() async throws -> String { sdkPath }
+    func configuration() async throws -> String { "" }
+    func setConfiguration(_: String) async throws { throw InstallerFailure.expected }
+}
+
+private struct StubSigningFailureProcess: ProcessRunning {
+    func run(executable: String, arguments _: [String]) async throws -> Data {
+        if executable == "/usr/bin/codesign" { throw InstallerFailure.expected }
         return Data()
     }
 }

@@ -1,4 +1,5 @@
 #import "FrameSocket.h"
+#import "FrameValidation.h"
 #import "GeistScreenCaptureWire.h"
 #import "SocketIO.h"
 
@@ -8,6 +9,7 @@
 #import <UIKit/UIKit.h>
 #import <ctype.h>
 #import <stdio.h>
+
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <unistd.h>
@@ -32,6 +34,7 @@ static int WriteAll(int fd, const void *bytes, size_t length) {
     size_t written = 0;
     while (written < length) {
         ssize_t count = write(fd, (const uint8_t *)bytes + written, length - written);
+        if (count < 0 && errno == EINTR) continue;
         if (count <= 0) return -1;
         written += (size_t)count;
     }
@@ -47,6 +50,9 @@ int GSCKConnect(uint32_t outputs, int32_t *status) {
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 
+    struct timeval timeout = { .tv_sec = 5 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     struct sockaddr_un address = {0};
     address.sun_family = AF_UNIX;
     if (strlen(path) >= sizeof(address.sun_path)) {
@@ -76,6 +82,8 @@ int GSCKConnect(uint32_t outputs, int32_t *status) {
         close(fd);
         return -1;
     }
+    timeout.tv_sec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     return fd;
 }
 
@@ -96,15 +104,6 @@ static NSDictionary *PixelBufferAttributes(OSType format) {
     };
 }
 
-static CGFloat ActiveScreenScale(void) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if ([scene isKindOfClass:UIWindowScene.class]) {
-            return ((UIWindowScene *)scene).screen.scale;
-        }
-    }
-    return 1;
-}
-
 static CVPixelBufferRef BuildBGRAPixelBuffer(const void *source,
                                              const geist_sck_frame_header_t *header) {
     size_t expected = (size_t)header->bytesPerRowPlane0 * header->height;
@@ -121,7 +120,10 @@ static CVPixelBufferRef BuildBGRAPixelBuffer(const void *source,
     );
     if (result != kCVReturnSuccess || !buffer) return NULL;
 
-    CVPixelBufferLockBaseAddress(buffer, 0);
+    if (CVPixelBufferLockBaseAddress(buffer, 0) != kCVReturnSuccess) {
+        CVPixelBufferRelease(buffer);
+        return NULL;
+    }
     uint8_t *destination = CVPixelBufferGetBaseAddress(buffer);
     size_t destinationStride = CVPixelBufferGetBytesPerRow(buffer);
     size_t copyLength = MIN(destinationStride, header->bytesPerRowPlane0);
@@ -153,7 +155,10 @@ static CVPixelBufferRef BuildNV12PixelBuffer(const void *source,
     );
     if (result != kCVReturnSuccess || !buffer) return NULL;
 
-    CVPixelBufferLockBaseAddress(buffer, 0);
+    if (CVPixelBufferLockBaseAddress(buffer, 0) != kCVReturnSuccess) {
+        CVPixelBufferRelease(buffer);
+        return NULL;
+    }
     for (size_t plane = 0; plane < 2; plane++) {
         size_t sourceStride = plane == 0
             ? header->bytesPerRowPlane0
@@ -173,8 +178,12 @@ static CVPixelBufferRef BuildNV12PixelBuffer(const void *source,
     return buffer;
 }
 
+static CMTime PresentationTime(const geist_sck_frame_header_t *header) {
+    return CMTimeMake((int64_t)header->timestampSeconds * 1000000000 + header->timestampNanoseconds, 1000000000);
+}
+
 static CMSampleBufferRef BuildVideoSampleBuffer(const void *payload,
-                                                const geist_sck_frame_header_t *header) {
+                                                const geist_sck_frame_header_t *header, CGFloat scale) {
     CVPixelBufferRef pixelBuffer = NULL;
     if (header->pixelFormatFourCC == GEIST_SCK_PIXFMT_BGRA32) {
         pixelBuffer = BuildBGRAPixelBuffer(payload, header);
@@ -193,7 +202,7 @@ static CMSampleBufferRef BuildVideoSampleBuffer(const void *payload,
 
     CMSampleTimingInfo timing = {
         .duration = CMTimeMake(1, 60),
-        .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()),
+        .presentationTimeStamp = PresentationTime(header),
         .decodeTimeStamp = kCMTimeInvalid,
     };
     CMSampleBufferRef sample = NULL;
@@ -204,20 +213,20 @@ static CMSampleBufferRef BuildVideoSampleBuffer(const void *payload,
     CVPixelBufferRelease(pixelBuffer);
     if (result != noErr || !sample) return NULL;
 
-    CMSetAttachment(sample, (__bridge CFStringRef)SCStreamFrameInfoStatus,
-                    (__bridge CFTypeRef)@(SCFrameStatusComplete),
-                    kCMAttachmentMode_ShouldPropagate);
-    CGFloat scale = ActiveScreenScale();
-    CMSetAttachment(sample, (__bridge CFStringRef)SCStreamFrameInfoContentRect,
-                    (__bridge CFTypeRef)[NSValue valueWithCGRect:CGRectMake(
-                        0, 0, header->width / scale, header->height / scale
-                    )], kCMAttachmentMode_ShouldPropagate);
-    CMSetAttachment(sample, (__bridge CFStringRef)SCStreamFrameInfoContentScale,
-                    (__bridge CFTypeRef)@(scale),
-                    kCMAttachmentMode_ShouldPropagate);
-    CMSetAttachment(sample, (__bridge CFStringRef)SCStreamFrameInfoScaleFactor,
-                    (__bridge CFTypeRef)@(scale),
-                    kCMAttachmentMode_ShouldPropagate);
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, true);
+    if (!attachments || CFArrayGetCount(attachments) == 0) {
+        CFRelease(sample);
+        return NULL;
+    }
+    NSMutableDictionary *info = (__bridge NSMutableDictionary *)CFArrayGetValueAtIndex(attachments, 0);
+    CGRect rect = CGRectMake(0, 0, header->width / scale, header->height / scale);
+    NSDictionary *contentRect = CFBridgingRelease(CGRectCreateDictionaryRepresentation(rect));
+    info[SCStreamFrameInfoStatus] = @(SCFrameStatusComplete);
+    info[SCStreamFrameInfoContentRect] = contentRect;
+    info[SCStreamFrameInfoScreenRect] = contentRect;
+    info[SCStreamFrameInfoContentScale] = @1;
+    info[SCStreamFrameInfoScaleFactor] = @(scale);
+    info[SCStreamFrameInfoDisplayTime] = @(CMClockConvertHostTimeToSystemUnits(timing.presentationTimeStamp));
     return sample;
 }
 
@@ -272,7 +281,7 @@ static CMSampleBufferRef BuildAudioSampleBuffer(const void *payload,
 
     CMSampleTimingInfo timing = {
         .duration = CMTimeMake(1, (int32_t)header->audioSampleRate),
-        .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()),
+        .presentationTimeStamp = PresentationTime(header),
         .decodeTimeStamp = kCMTimeInvalid,
     };
     CMSampleBufferRef sample = NULL;
@@ -285,12 +294,11 @@ static CMSampleBufferRef BuildAudioSampleBuffer(const void *payload,
     return result == noErr ? sample : NULL;
 }
 
-GSCKDeliveredSample GSCKReadNextSample(int fd) {
+GSCKDeliveredSample GSCKReadNextSample(int fd, CGFloat scale) {
     GSCKDeliveredSample empty = { .sampleBuffer = NULL, .type = 0 };
     geist_sck_frame_header_t header;
     if (GC_ReadAll(fd, &header, sizeof(header)) < 0 ||
-        header.magic != GEIST_SCK_WIRE_MAGIC ||
-        header.payloadSize > 64u * 1024u * 1024u) return empty;
+        !GSCKValidateFrameHeader(&header)) return empty;
 
     void *payload = malloc(header.payloadSize);
     if (!payload) return empty;
@@ -302,7 +310,7 @@ GSCKDeliveredSample GSCKReadNextSample(int fd) {
     GSCKDeliveredSample sample = empty;
     sample.type = (SCStreamOutputType)header.streamType;
     if (header.streamType == GEIST_SCK_STREAM_SCREEN) {
-        sample.sampleBuffer = BuildVideoSampleBuffer(payload, &header);
+        sample.sampleBuffer = BuildVideoSampleBuffer(payload, &header, scale);
     } else if (header.streamType == GEIST_SCK_STREAM_MICROPHONE) {
         sample.sampleBuffer = BuildAudioSampleBuffer(payload, &header);
     }

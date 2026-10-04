@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #define GEIST_SCK_WIRE_MAGIC 0x4753434Bu
-#define GEIST_SCK_WIRE_VERSION 1u
+#define GEIST_SCK_WIRE_VERSION 2u
 
 #define GEIST_SCK_OUTPUT_SCREEN     (1u << 0)
 #define GEIST_SCK_OUTPUT_AUDIO      (1u << 1)
@@ -50,4 +50,6 @@ typedef struct {
     uint32_t audioInterleaved;
     uint32_t audioSampleCount;
     uint32_t payloadSize;
+    uint32_t timestampSeconds;
+    uint32_t timestampNanoseconds;
 } geist_sck_frame_header_t;

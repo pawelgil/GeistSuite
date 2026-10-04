@@ -1,3 +1,4 @@
+import CoreMedia
 import AVFoundation
 import CoreVideo
 import Foundation
@@ -68,6 +69,20 @@ struct CaptureCoordinatorTests {
         #expect(screen.invocations == [.start, .stop])
     }
 
+    @Test
+    func activate_FrameEmittedDuringStart_DeliversInitialFrameAfterActivation() async throws {
+        let writer = SpyFrameWriter()
+        let sut = CaptureCoordinator(screen: StubInitialScreenFrame(),
+            microphone: DummyMicrophoneCapture(), writer: writer)
+
+        try await sut.start(outputs: [.screen])
+        #expect(writer.frames.isEmpty)
+        await sut.activate()
+
+        #expect(writer.frames.count == 1)
+        await sut.stop()
+    }
+
     private func createSUT(
         screen: any ScreenFrameCapturing = DummyScreenFrameCapture(),
         microphone: any MicrophoneCapturing = DummyMicrophoneCapture()
@@ -81,23 +96,15 @@ struct CaptureCoordinatorTests {
 }
 
 private final class SpyScreenFrameCapture: ScreenFrameCapturing {
-    // MARK: Nested Types
-
     enum Invocation: Equatable { case start, stop }
 
-    // MARK: Properties
-
     private let recordedInvocations = Mutex<[Invocation]>([])
-
-    // MARK: Computed Properties
 
     var invocations: [Invocation] {
         recordedInvocations.withLock { $0 }
     }
 
-    // MARK: Functions
-
-    func start(delivering _: @escaping @Sendable (CVPixelBuffer) -> Void) throws {
+    func start(delivering _: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
         recordedInvocations.withLock { $0.append(.start) }
     }
 
@@ -107,23 +114,15 @@ private final class SpyScreenFrameCapture: ScreenFrameCapturing {
 }
 
 private final class SpyMicrophoneCapture: MicrophoneCapturing {
-    // MARK: Nested Types
-
     enum Invocation: Equatable { case start, stop }
 
-    // MARK: Properties
-
     private let recordedInvocations = Mutex<[Invocation]>([])
-
-    // MARK: Computed Properties
 
     var invocations: [Invocation] {
         recordedInvocations.withLock { $0 }
     }
 
-    // MARK: Functions
-
-    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) throws {
         recordedInvocations.withLock { $0.append(.start) }
     }
 
@@ -133,23 +132,19 @@ private final class SpyMicrophoneCapture: MicrophoneCapturing {
 }
 
 private struct DummyScreenFrameCapture: ScreenFrameCapturing {
-    func start(delivering _: @escaping @Sendable (CVPixelBuffer) -> Void) throws {}
+    func start(delivering _: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {}
     func stop() {}
 }
 
 private struct DummyMicrophoneCapture: MicrophoneCapturing {
-    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {}
+    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) throws {}
     func stop() {}
 }
 
 private struct StubFailingMicrophoneCapture: MicrophoneCapturing {
-    // MARK: Nested Types
-
     enum Failure: Swift.Error { case expected }
 
-    // MARK: Functions
-
-    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    func start(delivering _: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) throws {
         throw Failure.expected
     }
 
@@ -158,4 +153,19 @@ private struct StubFailingMicrophoneCapture: MicrophoneCapturing {
 
 private struct DummyFrameWriter: CaptureFrameWriting {
     func write(_: Data) {}
+}
+
+private struct StubInitialScreenFrame: ScreenFrameCapturing {
+    func start(delivering handler: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
+        var frame: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 2, 2, kCVPixelFormatType_32BGRA, nil, &frame)
+        handler(try #require(frame), .zero)
+    }
+    func stop() {}
+}
+
+private final class SpyFrameWriter: CaptureFrameWriting {
+    private let received = Mutex<[Data]>([])
+    var frames: [Data] { received.withLock { $0 } }
+    func write(_ data: Data) { received.withLock { $0.append(data) } }
 }

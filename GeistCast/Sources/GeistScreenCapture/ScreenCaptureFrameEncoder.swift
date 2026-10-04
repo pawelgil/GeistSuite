@@ -1,27 +1,33 @@
+import CoreMedia
 import AVFoundation
 import CoreVideo
 import Foundation
 import GeistScreenCaptureShimCore
 
 struct ScreenCaptureFrameEncoder {
-    func encodeMicrophone(_ buffer: AVAudioPCMBuffer) -> Data? {
-        guard buffer.frameLength > 0,
+    func encodeMicrophone(_ buffer: AVAudioPCMBuffer, presentationTime: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) -> Data? {
+        guard presentationTime.isNumeric, presentationTime >= .zero,
+              buffer.frameLength > 0,
+              buffer.format.sampleRate > 0, buffer.format.sampleRate <= Double(UInt32.max),
               let encoded = audioPayload(buffer)
         else { return nil }
-        let header = audioHeader(buffer: buffer, encoded: encoded)
+        let header = audioHeader(buffer: buffer, encoded: encoded, presentationTime: presentationTime)
         var result = header.encode()
         result.append(encoded.data)
         return result
     }
 
-    func encodeVideo(_ pixelBuffer: CVPixelBuffer) -> Data? {
+    func encodeVideo(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) -> Data? {
+        guard presentationTime.isNumeric, presentationTime >= .zero else { return nil }
+        guard [kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+            .contains(CVPixelBufferGetPixelFormatType(pixelBuffer)) else { return nil }
         guard CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly) == kCVReturnSuccess else {
             return nil
         }
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
         guard let planes = planes(from: pixelBuffer) else { return nil }
-        let header = videoHeader(pixelBuffer: pixelBuffer, planes: planes)
+        let header = videoHeader(pixelBuffer: pixelBuffer, planes: planes, presentationTime: presentationTime)
         var result = header.encode()
         result.append(planes.payload)
         return result
@@ -66,7 +72,7 @@ struct ScreenCaptureFrameEncoder {
         return PlaneData(data: Data(bytes: base, count: byteCount), bytesPerRow: bytesPerRow)
     }
 
-    private func videoHeader(pixelBuffer: CVPixelBuffer, planes: PixelPlanes) -> FrameHeader {
+    private func videoHeader(pixelBuffer: CVPixelBuffer, planes: PixelPlanes, presentationTime: CMTime) -> FrameHeader {
         FrameHeader(
             streamType: GEIST_SCK_STREAM_SCREEN,
             pixelFormatFourCC: CVPixelBufferGetPixelFormatType(pixelBuffer),
@@ -74,7 +80,8 @@ struct ScreenCaptureFrameEncoder {
             height: UInt32(CVPixelBufferGetHeight(pixelBuffer)),
             bytesPerRowPlane0: planes.bytesPerRowPlane0,
             bytesPerRowPlane1: planes.bytesPerRowPlane1,
-            payloadSize: UInt32(planes.payload.count)
+            payloadSize: UInt32(planes.payload.count),
+            presentationTime: presentationTime
         )
     }
 
@@ -90,42 +97,36 @@ struct ScreenCaptureFrameEncoder {
     }
 
     private func floatPayload(_ buffer: AVAudioPCMBuffer) -> EncodedAudio? {
-        guard let channels = buffer.floatChannelData else { return nil }
-        let bytes = Int(buffer.frameLength) * MemoryLayout<Float>.size
-        return EncodedAudio(
-            data: channelData(channels, count: Int(buffer.format.channelCount), bytes: bytes),
-            format: GEIST_SCK_AUDIO_PCM_FLOAT32
-        )
+        payload(buffer, bytesPerSample: MemoryLayout<Float>.size, format: GEIST_SCK_AUDIO_PCM_FLOAT32)
     }
 
     private func int16Payload(_ buffer: AVAudioPCMBuffer) -> EncodedAudio? {
-        guard let channels = buffer.int16ChannelData else { return nil }
-        let bytes = Int(buffer.frameLength) * MemoryLayout<Int16>.size
-        return EncodedAudio(
-            data: channelData(channels, count: Int(buffer.format.channelCount), bytes: bytes),
-            format: GEIST_SCK_AUDIO_PCM_INT16
-        )
+        payload(buffer, bytesPerSample: MemoryLayout<Int16>.size, format: GEIST_SCK_AUDIO_PCM_INT16)
     }
 
-    private func channelData<Sample>(
-        _ channels: UnsafePointer<UnsafeMutablePointer<Sample>>,
-        count: Int,
-        bytes: Int
-    ) -> Data {
-        (0 ..< count).reduce(into: Data()) { data, index in
-            data.append(Data(bytes: channels[index], count: bytes))
+    private func payload(_ buffer: AVAudioPCMBuffer, bytesPerSample: Int, format: UInt32) -> EncodedAudio? {
+        let buffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let channels = Int(buffer.format.channelCount)
+        guard channels > 0, buffers.count == (buffer.format.isInterleaved ? 1 : channels) else { return nil }
+        var data = Data()
+        for audioBuffer in buffers {
+            let size = Int(buffer.frameLength) * bytesPerSample * Int(audioBuffer.mNumberChannels)
+            guard let source = audioBuffer.mData, size <= Int(audioBuffer.mDataByteSize) else { return nil }
+            data.append(Data(bytes: source, count: size))
         }
+        return EncodedAudio(data: data, format: format)
     }
 
-    private func audioHeader(buffer: AVAudioPCMBuffer, encoded: EncodedAudio) -> FrameHeader {
+    private func audioHeader(buffer: AVAudioPCMBuffer, encoded: EncodedAudio, presentationTime: CMTime) -> FrameHeader {
         FrameHeader(
             streamType: GEIST_SCK_STREAM_MICROPHONE,
             audioSampleRate: UInt32(buffer.format.sampleRate),
             audioChannelCount: UInt32(buffer.format.channelCount),
             audioSampleFormat: encoded.format,
-            audioInterleaved: 0,
+            audioInterleaved: buffer.format.isInterleaved ? 1 : 0,
             audioSampleCount: UInt32(buffer.frameLength),
-            payloadSize: UInt32(encoded.data.count)
+            payloadSize: UInt32(encoded.data.count),
+            presentationTime: presentationTime
         )
     }
 }

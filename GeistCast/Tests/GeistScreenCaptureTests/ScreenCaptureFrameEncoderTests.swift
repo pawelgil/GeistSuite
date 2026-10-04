@@ -6,7 +6,7 @@ import Testing
 
 struct ScreenCaptureFrameEncoderTests {
     @Test
-    func encodeVideo_BGRAFrame_preservesDimensionsAndPayload() throws {
+    func encodeVideo_BGRAFrame_PreservesDimensionsAndPayload() throws {
         let pixelBuffer = try makePixelBuffer(width: 2, height: 2)
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         let payloadSize = CVPixelBufferGetBytesPerRow(pixelBuffer)
@@ -28,7 +28,7 @@ struct ScreenCaptureFrameEncoderTests {
     }
 
     @Test
-    func encodeMicrophone_FloatPCM_preservesAudioFormat() throws {
+    func encodeMicrophone_FloatPCM_PreservesAudioFormat() throws {
         let buffer = try makeAudioBuffer(sampleRate: 48000, channels: 1, frames: 16)
         for index in 0 ..< 16 {
             buffer.floatChannelData?[0][index] = Float(index) / 16
@@ -51,7 +51,7 @@ struct ScreenCaptureFrameEncoderTests {
     }
 
     @Test
-    func encodeMicrophone_Int16PCM_preservesSamples() throws {
+    func encodeMicrophone_Int16PCM_PreservesSamples() throws {
         let format = try #require(AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: 48000,
@@ -72,6 +72,35 @@ struct ScreenCaptureFrameEncoderTests {
         #expect(header.audioSampleFormat == GEIST_SCK_AUDIO_PCM_INT16)
         let samples = data.dropFirst(FrameHeader.byteCount).withUnsafeBytes {
             Array($0.bindMemory(to: Int16.self))
+        }
+        #expect(samples == expected)
+    }
+
+    @Test(arguments: [true, false])
+    func encodeMicrophone_StereoPCM_PreservesChannelLayout(interleaved: Bool) throws {
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+            sampleRate: 48000, channels: 2, interleaved: interleaved))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2))
+        buffer.frameLength = 2
+        let buffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let expected: [Float] = interleaved ? [1, 3, 2, 4] : [1, 2, 3, 4]
+        var offset = 0
+        for audio in buffers {
+            let samples = try #require(audio.mData).assumingMemoryBound(to: Float.self)
+            for index in 0..<Int(audio.mDataByteSize) / 4 {
+                samples[index] = expected[offset]
+                offset += 1
+            }
+        }
+
+        let data = try #require(ScreenCaptureFrameEncoder().encodeMicrophone(buffer))
+
+        let header = try #require(FrameHeader.decode(data))
+        #expect(header.audioInterleaved == (interleaved ? 1 : 0))
+        #expect(header.audioChannelCount == 2)
+        let payload = data.dropFirst(FrameHeader.byteCount)
+        let samples = stride(from: 0, to: payload.count, by: 4).map { offset in
+            payload.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: Float.self) }
         }
         #expect(samples == expected)
     }

@@ -12,4 +12,4 @@ int GSCKConnect(uint32_t outputs, int32_t *status);
 bool GSCKIsAvailable(void);
 void GSCKClose(int fd);
 void GSCKShutdown(int fd);
-GSCKDeliveredSample GSCKReadNextSample(int fd);
+GSCKDeliveredSample GSCKReadNextSample(int fd, CGFloat scale);

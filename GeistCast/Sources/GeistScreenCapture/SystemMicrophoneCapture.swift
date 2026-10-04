@@ -4,35 +4,31 @@ import Foundation
 import Synchronization
 
 final class SystemMicrophoneCapture: MicrophoneCapturing {
-    // MARK: Nested Types
-
     enum Error: Swift.Error {
         case permissionNotGranted
         case unavailable
     }
 
-    // MARK: Properties
-
     private let delegate = MicrophoneSampleDelegate()
     private let queue = DispatchQueue(label: "com.geist.screencapture.microphone")
     private let session = Mutex<CaptureSessionBox?>(nil)
 
-    // MARK: Functions
-
-    func start(delivering handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    func start(delivering handler: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) throws {
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             throw Error.permissionNotGranted
         }
         guard let device = AVCaptureDevice.default(for: .audio) else { throw Error.unavailable }
         let captureSession = try makeSession(device: device)
-        delegate.bind(handler)
-        session.withLock { $0 = CaptureSessionBox(captureSession) }
-        captureSession.startRunning()
+        session.withLock {
+            delegate.bind(handler)
+            $0 = CaptureSessionBox(captureSession)
+            captureSession.startRunning()
+        }
     }
 
     func stop() {
-        delegate.unbind()
         session.withLock { current in
+            delegate.unbind()
             current?.value.stopRunning()
             current = nil
         }
@@ -63,11 +59,7 @@ final class SystemMicrophoneCapture: MicrophoneCapturing {
 
 /// The immutable session is accessed only while the owning mutex is held.
 private final class CaptureSessionBox: @unchecked Sendable {
-    // MARK: Properties
-
     let value: AVCaptureSession
-
-    // MARK: Lifecycle
 
     init(_ value: AVCaptureSession) {
         self.value = value
@@ -79,11 +71,16 @@ private final class MicrophoneSampleDelegate: NSObject,
     AVCaptureAudioDataOutputSampleBufferDelegate,
     @unchecked Sendable
 {
-    // MARK: Properties
+    // A box keeps callbacks out of generic closure reabstraction, which can recurse in Swift 6.
+    private final class Handler: Sendable {
+        let invoke: @Sendable (AVAudioPCMBuffer, CMTime) -> Void
 
-    private let handler = Mutex<(@Sendable (AVAudioPCMBuffer) -> Void)?>(nil)
+        init(_ invoke: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) {
+            self.invoke = invoke
+        }
+    }
 
-    // MARK: Static Functions
+    private let handler = Mutex<Handler?>(nil)
 
     private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
@@ -111,28 +108,22 @@ private final class MicrophoneSampleDelegate: NSObject,
     }
 
     private static func copyBlock(_ block: CMBlockBuffer, into buffer: AVAudioPCMBuffer) -> Bool {
-        var length = 0
-        var totalLength = 0
-        var source: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(
-            block,
-            atOffset: 0,
-            lengthAtOffsetOut: &length,
-            totalLengthOut: &totalLength,
-            dataPointerOut: &source
-        )
-        guard status == noErr,
-              let source,
-              let destination = buffer.floatChannelData?[0]
-        else { return false }
-        memcpy(destination, source, totalLength)
+        let buffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let totalLength = CMBlockBufferGetDataLength(block)
+        guard buffers.reduce(0, { $0 + Int($1.mDataByteSize) }) == totalLength else { return false }
+        var offset = 0
+        for audioBuffer in buffers {
+            guard let destination = audioBuffer.mData else { return false }
+            let count = Int(audioBuffer.mDataByteSize)
+            guard CMBlockBufferCopyDataBytes(block, atOffset: offset, dataLength: count,
+                                            destination: destination) == noErr else { return false }
+            offset += count
+        }
         return true
     }
 
-    // MARK: Functions
-
-    func bind(_ handler: @escaping @Sendable (AVAudioPCMBuffer) -> Void) {
-        self.handler.withLock { $0 = handler }
+    func bind(_ handler: @escaping @Sendable (AVAudioPCMBuffer, CMTime) -> Void) {
+        self.handler.withLock { $0 = Handler(handler) }
     }
 
     func unbind() {
@@ -145,6 +136,6 @@ private final class MicrophoneSampleDelegate: NSObject,
         from _: AVCaptureConnection
     ) {
         guard let buffer = Self.pcmBuffer(from: sampleBuffer) else { return }
-        handler.withLock { $0 }?(buffer)
+        handler.withLock { $0 }?.invoke(buffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
     }
 }

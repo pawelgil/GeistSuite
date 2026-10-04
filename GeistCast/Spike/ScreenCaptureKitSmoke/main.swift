@@ -18,9 +18,18 @@ struct ScreenCaptureKitSmoke {
 
     // MARK: Static Functions
 
-    static func main() async throws {
-        guard CommandLine.arguments.count == 2 else {
-            print("usage: ScreenCaptureKitSmoke <app-path>")
+    static func main() async {
+        do {
+            try await run()
+        } catch {
+            FileHandle.standardError.write(Data("ScreenCaptureKit smoke failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    private static func run() async throws {
+        guard (2...3).contains(CommandLine.arguments.count) else {
+            print("usage: ScreenCaptureKitSmoke <app-path> [bundle-id]")
             exit(2)
         }
         let appPath = CommandLine.arguments[1]
@@ -31,8 +40,19 @@ struct ScreenCaptureKitSmoke {
 
         let session = try GeistScreenCaptureSession(simulator: simulator)
         try await session.start()
-        defer { Task { await session.stop() } }
+        do {
+            try await verify(appPath: appPath, device: device, resultPath: resultPath, simulator: simulator)
+        } catch {
+            await session.stop()
+            throw error
+        }
+        await session.stop()
+    }
 
+    private static func verify(appPath: String, device: SimDevice, resultPath: String, simulator: UUID) async throws {
+        let bundleID = CommandLine.arguments.count == 3 ? CommandLine.arguments[2]
+            : "com.geistcast.tests.screencapturekit-client"
+        defer { unlink(resultPath) }
         var installError: NSError?
         guard device.installApplication(
             URL(fileURLWithPath: appPath),
@@ -42,7 +62,13 @@ struct ScreenCaptureKitSmoke {
             throw Failure.install(installError?.localizedDescription ?? "unknown error")
         }
 
-        let bundleID = "com.geistcast.tests.screencapturekit-client"
+        defer {
+            var cleanupError: NSError?
+            _ = device.terminateApplication(withID: bundleID, error: &cleanupError)
+            if CommandLine.arguments.count == 3 {
+                _ = device.uninstallApplication(bundleID, withOptions: [:], error: &cleanupError)
+            }
+        }
         var pid: Int32 = 0
         var launchError: NSError?
         guard device.launchApplication(
@@ -57,18 +83,12 @@ struct ScreenCaptureKitSmoke {
         for _ in 0 ..< 100 {
             if FileManager.default.fileExists(atPath: resultPath) {
                 let result = try String(contentsOfFile: resultPath, encoding: .utf8)
-                var terminationError: NSError?
-                _ = device.terminateApplication(withID: bundleID, error: &terminationError)
-                unlink(resultPath)
-                await session.stop()
                 guard result == "SCK_FRAME_OK" else { throw Failure.client(result) }
                 print("SCREEN_CAPTURE_KIT_SMOKE_OK simulator=\(simulator) pid=\(pid)")
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        var terminationError: NSError?
-        _ = device.terminateApplication(withID: bundleID, error: &terminationError)
         throw Failure.timeout
     }
 
