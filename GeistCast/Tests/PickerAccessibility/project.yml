@@ -20,6 +20,7 @@ targets:
     sources:
       - path: PickerAccessibilityTests.swift
       - path: ../../Sources/GeistBroadcastAppShim/PickerUI/PickerControls.m
+      - path: ../../Sources/GeistBroadcastAppShim/PickerUI/GCDismissBackdropView.m
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.geistcast.picker-accessibility-tests
