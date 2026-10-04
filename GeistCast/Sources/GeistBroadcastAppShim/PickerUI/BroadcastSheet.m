@@ -1,4 +1,5 @@
 #import "BroadcastSheet.h"
+#import "GCDismissBackdropView.h"
 #import "PickerCells.h"
 #import "PickerControls.h"
 #import "LiquidGlassCompat.h"
@@ -50,6 +51,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
     UIViewPropertyAnimator *_backdropBlurAnimator;
     GCRecordDotView *_statusDot;
     GCFooterButton *_actionButton;
+    GCDismissBackdropView *_dismissBackdrop;
     GCPaddedLabel *_micStateLabel;
     id _micAuthChangeObserver;
     BOOL _micEnabled;
@@ -150,7 +152,10 @@ static UIWindow *gBroadcastSheetWindow = nil;
     }];
     _backdropBlurAnimator.fractionComplete = 0.30;
 
-    UIView *dimmingView = [[UIView alloc] init];
+    GCDismissBackdropView *dimmingView = [[GCDismissBackdropView alloc] init];
+    __weak GCBroadcastSheet *weakSelf = self;
+    dimmingView.dismissalHandler = ^{ [weakSelf backdropTapped]; };
+    _dismissBackdrop = dimmingView;
     dimmingView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.50];
     dimmingView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:dimmingView];
@@ -466,6 +471,7 @@ static UIWindow *gBroadcastSheetWindow = nil;
     else title = @"Start Recording";
     [_actionButton setTitle:title];
     _actionButton.enabled = !_isStarting;
+    _dismissBackdrop.dismissalEnabled = !_isStarting;
     [self applyMicAuthState];
 }
 
