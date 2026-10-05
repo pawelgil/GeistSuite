@@ -100,3 +100,13 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""
         GENERATE_INFOPLIST_FILE: YES
+schemes:
+  GeistLens:
+    build:
+      targets:
+        GeistLens: all
+    test:
+      targets:
+        - GeistLensTests
+      environmentVariables:
+        DYLD_FRAMEWORK_PATH: /Library/Developer/PrivateFrameworks:$(BUILT_PRODUCTS_DIR)

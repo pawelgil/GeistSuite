@@ -167,6 +167,79 @@ struct GeistCamSessionTests {
         #expect(stopped)
     }
 
+    @Test(arguments: [nil, CameraSlot.microphone])
+    func Attach_ActiveMediaSource_ReplacesPreviousSlotOwner(audioSlot: CameraSlot?) async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        let original = MediaSourceSpy()
+        try await session.attachMediaSource(original, video: .backCamera, audio: audioSlot)
+        try await session.start(connectTimeout: 2)
+        _ = try #require(await server.firstInbound(matching: .hello, timeout: 2))
+        server.send(.helloAck, payload: makeHelloAckPayload(version: 1, initial: [1, 0, 0]))
+        let started = await original.waitForStart()
+
+        let replacement = VideoProducerSpy()
+        try await session.attach(.customVideo(replacement), to: .backCamera)
+        let originalStops = original.stopCallCount
+        let replacementStarts = replacement.startCallCount
+        try await session.detach(.backCamera)
+        let replacementStops = replacement.stopCallCount
+        await session.stop()
+
+        #expect(started)
+        #expect(originalStops == 1)
+        #expect(replacementStarts == 1)
+        #expect(replacementStops == 1)
+        #expect(original.stopCallCount == 1)
+        #expect(replacement.stopCallCount == 1)
+    }
+
+    @Test func PairedSource_OneSlotStillActive_StopsOnlyAfterBothSlotsDeactivate() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        let source = MediaSourceSpy()
+        try await session.attachMediaSource(source, video: .backCamera, audio: .microphone)
+        try await session.start(connectTimeout: 2)
+        _ = try #require(await server.firstInbound(matching: .hello, timeout: 2))
+        server.send(.helloAck, payload: makeHelloAckPayload(version: 1, initial: [1, 0, 1]))
+        let started = await source.waitForStart()
+
+        server.send(.slotActive, payload: makeSlotActivePayload(slot: 0, active: 0))
+        server.send(.activeFormat, payload: makeActiveFormatPayload(
+            slot: 0, width: 640, height: 480, pixelFormat: 0x34323066
+        ))
+        let processedDeactivation = await pollUntil({ source.reformatCallCount > 0 }, timeout: 2)
+        let stopsWhileAudioActive = source.stopCallCount
+        server.send(.slotActive, payload: makeSlotActivePayload(slot: 2, active: 0))
+        let stopped = await pollUntil({ source.stopCallCount > 0 }, timeout: 2)
+        await session.stop()
+
+        #expect(started)
+        #expect(processedDeactivation)
+        #expect(stopsWhileAudioActive == 0)
+        #expect(stopped)
+        #expect(source.startCallCount == 1)
+        #expect(source.stopCallCount == 1)
+    }
+
+    @Test func Stop_PendingControlRequest_FailsAsDisconnected() async throws {
+        let server = try TestFeederServer.listen()
+        defer { server.close() }
+        let session = GeistCamSession(socketPath: server.socketPath)
+        try await session.start(connectTimeout: 2)
+        _ = try #require(await server.firstInbound(matching: .hello, timeout: 2))
+        let request = Task { try await session.cameraStatus() }
+        _ = try #require(await server.firstInbound(matching: .controlRequest, timeout: 2))
+
+        await session.stop()
+
+        await #expect(throws: GeistCamError.self) {
+            try await request.value
+        }
+    }
+
     @Test func cameraStatus_roundTripsStructuredShimResponse() async throws {
         let server = try TestFeederServer.listen()
         defer { server.close() }
@@ -375,11 +448,11 @@ private final class SessionDelegateSpy: GeistCamSessionDelegate, Sendable {
 
 private final class MediaSourceSpy: MediaSource, @unchecked Sendable {
     let hasVideo = true
-    let hasAudio = false
+    let hasAudio = true
     let declaredVideoFormat: VideoSlotFormat? = VideoSlotFormat(
         width: 320, height: 240, pixelFormat: .yuv420FullRange, fps: 30
     )
-    let declaredAudioFormat: AudioSlotFormat? = nil
+    let declaredAudioFormat: AudioSlotFormat? = AudioSlotFormat(sampleRate: 48000, channels: 1)
 
     private let lock = NSLock()
     private let startContinuation: AsyncStream<Void>.Continuation
@@ -431,5 +504,25 @@ private final class MediaSourceSpy: MediaSource, @unchecked Sendable {
             group.cancelAll()
             return result
         }
+    }
+}
+
+private final class VideoProducerSpy: VideoFrameProducer, Sendable {
+    let declaredFormat = VideoSlotFormat(width: 320, height: 240, pixelFormat: .yuv420FullRange, fps: 30)
+    private struct Calls {
+        var starts = 0
+        var stops = 0
+    }
+    private let calls = Mutex(Calls())
+
+    var startCallCount: Int { calls.withLock { $0.starts } }
+    var stopCallCount: Int { calls.withLock { $0.stops } }
+
+    func start(into sink: any VideoFrameSink) throws {
+        calls.withLock { $0.starts += 1 }
+    }
+
+    func stop() {
+        calls.withLock { $0.stops += 1 }
     }
 }

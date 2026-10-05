@@ -1,143 +1,10 @@
-import AVFoundation
-import CoreMedia
-import CoreVideo
 import Foundation
 import Synchronization
-import GeistKit
-
-public enum GeistCamError: Error {
-    case slotNotSupported(CameraSlot)
-    case notStarted
-    case alreadyStarted
-    case stoppedDuringStart
-}
-
-public enum SourceSwitchError: Error {
-    case recordingInProgress
-}
-
-public enum CameraInterruptionReason: String, Codable, CaseIterable, Sendable {
-    case audioDeviceInUseByAnotherClient
-    case sensitiveContentMitigationActivated
-    case videoDeviceInUseByAnotherClient
-    case videoDeviceNotAvailableDueToSystemPressure
-    case videoDeviceNotAvailableInBackground
-    case videoDeviceNotAvailableWithMultipleForegroundApps
-
-    var rawAVFoundationValue: Int {
-        switch self {
-        case .videoDeviceNotAvailableInBackground: 1
-        case .audioDeviceInUseByAnotherClient: 2
-        case .videoDeviceInUseByAnotherClient: 3
-        case .videoDeviceNotAvailableWithMultipleForegroundApps: 4
-        case .videoDeviceNotAvailableDueToSystemPressure: 5
-        case .sensitiveContentMitigationActivated: 6
-        }
-    }
-
-    static func from(rawAVFoundationValue value: Int) -> CameraInterruptionReason? {
-        allCases.first { $0.rawAVFoundationValue == value }
-    }
-}
-
-public struct CameraSessionSnapshot: Codable, Sendable, Equatable {
-    public let holdsCamera: Bool
-    public let id: String
-    public let inputs: [String]
-    public let interruptionReason: Int?
-    public let isInterrupted: Bool
-    public let isRunning: Bool
-    public let outputs: [String]
-    public let startOrder: Int?
-    public let startedAt: Date?
-
-    public init(
-        holdsCamera: Bool,
-        id: String,
-        inputs: [String],
-        interruptionReason: Int?,
-        isInterrupted: Bool,
-        isRunning: Bool,
-        outputs: [String],
-        startOrder: Int?,
-        startedAt: Date?
-    ) {
-        self.holdsCamera = holdsCamera
-        self.id = id
-        self.inputs = inputs
-        self.interruptionReason = interruptionReason
-        self.isInterrupted = isInterrupted
-        self.isRunning = isRunning
-        self.outputs = outputs
-        self.startOrder = startOrder
-        self.startedAt = startedAt
-    }
-}
-
-public struct CameraStatusSnapshot: Codable, Sendable, Equatable {
-    public let holder: String?
-    public let runningCount: Int
-    public let sessions: [CameraSessionSnapshot]
-
-    public init(holder: String?, runningCount: Int, sessions: [CameraSessionSnapshot]) {
-        self.holder = holder
-        self.runningCount = runningCount
-        self.sessions = sessions
-    }
-}
-
-public struct CameraInterruptionChange: Codable, Sendable, Equatable {
-    public struct Skipped: Codable, Sendable, Equatable {
-        public let reason: String
-        public let session: String
-
-        public init(reason: String, session: String) {
-            self.reason = reason
-            self.session = session
-        }
-    }
-
-    public let affected: [String]
-    public let skipped: [Skipped]
-
-    public init(affected: [String], skipped: [Skipped]) {
-        self.affected = affected
-        self.skipped = skipped
-    }
-}
-
-public struct CameraControlError: LocalizedError, Sendable {
-    public let message: String
-
-    public var errorDescription: String? { message }
-}
-
-public protocol GeistCamSessionDelegate: AnyObject, Sendable {
-    func sessionDidConnect(_ session: GeistCamSession)
-    func sessionDidDisconnect(_ session: GeistCamSession)
-    func session(_ session: GeistCamSession, didActivateSlotWithoutSource slot: CameraSlot)
-    func session(_ session: GeistCamSession, isStreamingChanged isStreaming: Bool)
-}
-
-public protocol SessionDriving: AnyObject, Sendable {
-    func attachMediaSource(_ source: any MediaSource,
-                           video: CameraSlot?,
-                           audio: CameraSlot?) async throws(SourceSwitchError)
-    func start(connectTimeout: TimeInterval) async throws
-    func stop() async
-}
-
-public extension GeistCamSessionDelegate {
-    func sessionDidConnect(_ session: GeistCamSession) {}
-    func sessionDidDisconnect(_ session: GeistCamSession) {}
-    func session(_ session: GeistCamSession, didActivateSlotWithoutSource slot: CameraSlot) {}
-    func session(_ session: GeistCamSession, isStreamingChanged isStreaming: Bool) {}
-}
 
 /// One feeder session per app launch. Typical setup:
 /// ```swift
 /// let session = GeistCamSession(delegate: self)
-/// await session.attach(.video(stimURL), to: .backCamera)
+/// try await session.attach(.stillImage(stimURL), to: .backCamera)
 /// try await launcher.launch(app, env: session.injectionEnv())
 /// try await session.start()
 /// ```
@@ -157,49 +24,13 @@ public actor GeistCamSession: SessionDriving {
         }
     }()
 
-    fileprivate enum AnyProducer {
-        case video(any VideoFrameProducer)
-        case audio(any AudioFrameProducer)
-
-        func stop() {
-            switch self {
-            case .video(let p): p.stop()
-            case .audio(let p): p.stop()
-            }
-        }
-    }
-
-    fileprivate final class MediaSourceRegistration {
-        let source: any MediaSource
-        let videoSlot: CameraSlot?
-        let audioSlot: CameraSlot?
-        let fanout: FanoutMediaSink
-        var videoSink: VideoSlotBoundSink?
-        var audioSink: AudioSlotBoundSink?
-        var running: Bool = false
-
-        init(source: any MediaSource, video: CameraSlot?, audio: CameraSlot?) {
-            self.source = source
-            self.videoSlot = video
-            self.audioSlot = audio
-            self.fanout = FanoutMediaSink()
-        }
-    }
-
-    private var producers: [CameraSlot: AnyProducer] = [:]
-    private var videoSinks: [CameraSlot: VideoSlotBoundSink] = [:]
-    private var lastActiveFormat: [CameraSlot: VideoSlotFormat] = [:]
-    private var runningProducers: Set<CameraSlot> = []
-    private var mediaSources: [ObjectIdentifier: MediaSourceRegistration] = [:]
-    private var slotToMediaSource: [CameraSlot: ObjectIdentifier] = [:]
+    private lazy var sources = CameraSourceRegistry(
+        demandRegistry: demandRegistry, hostDetector: hostDetector, heartbeat: heartbeat
+    )
 
     private let heartbeat = FrameHeartbeat()
     private var streamingWatchdog: Task<Void, Never>?
     private var isStreaming: Bool = false
-    // Decoupled from `runningProducers` so detach→reattach restarts
-    // the new producer when the shim still wants frames.
-    private var slotsWantedByShim: Set<CameraSlot> = []
-    private var loggedActivationsWithoutSource: Set<CameraSlot> = []
     private var client: SocketClient?
     private var inboundTask: Task<Void, Never>?
     private var pendingControlRequests: [String: CheckedContinuation<Data, Error>] = [:]
@@ -273,30 +104,14 @@ public actor GeistCamSession: SessionDriving {
             producer.stop()
             return
         }
-        if runningProducers.contains(slot), let prev = producers[slot] {
-            prev.stop()
-            runningProducers.remove(slot)
-        }
-        producers[slot] = producer
-        let shouldStart = slotsWantedByShim.contains(slot) && client != nil
-        if shouldStart {
-            startProducer(producer, for: slot)
-        }
+        sources.attach(producer, to: slot)
     }
 
     public func detach(_ slot: CameraSlot) throws(SourceSwitchError) {
         if isRecording.load(ordering: .relaxed) {
             throw .recordingInProgress
         }
-        if let id = slotToMediaSource[slot] {
-            evictMediaSource(id)
-            return
-        }
-        let p = producers.removeValue(forKey: slot)
-        videoSinks.removeValue(forKey: slot)
-        if runningProducers.remove(slot) != nil {
-            p?.stop()
-        }
+        sources.detach(slot)
     }
 
     /// Attach a paired-stream source. The source is started exactly once and
@@ -305,148 +120,18 @@ public actor GeistCamSession: SessionDriving {
     /// producer or media source registered for that slot — including, for
     /// paired sources, eviction of the partner slot.
     public func attachMediaSource(_ source: any MediaSource,
-                                   video videoSlot: CameraSlot? = nil,
-                                   audio audioSlot: CameraSlot? = nil) async throws(SourceSwitchError) {
+                                  video videoSlot: CameraSlot? = nil,
+                                  audio audioSlot: CameraSlot? = nil) async throws(SourceSwitchError) {
         if isRecording.load(ordering: .relaxed) {
             throw .recordingInProgress
         }
-        if videoSlot == nil && audioSlot == nil {
-            log.warn("attachMediaSource called with no slots")
-            return
-        }
-        if let v = videoSlot, v.wireIndex == nil {
-            log.warn("attachMediaSource: video slot \(v.debugLabel) not supported by v1 shim")
-            return
-        }
-        if let a = audioSlot, a.wireIndex == nil {
-            log.warn("attachMediaSource: audio slot \(a.debugLabel) not supported by v1 shim")
-            return
-        }
-
-        // Evict any prior owners of the requested slots.
-        var evicting: Set<ObjectIdentifier> = []
-        if let v = videoSlot, let id = slotToMediaSource[v] { evicting.insert(id) }
-        if let a = audioSlot, let id = slotToMediaSource[a] { evicting.insert(id) }
-        for id in evicting { evictMediaSource(id) }
-
-        for slot in [videoSlot, audioSlot].compactMap({ $0 }) {
-            if let p = producers.removeValue(forKey: slot) {
-                videoSinks.removeValue(forKey: slot)
-                if runningProducers.remove(slot) != nil { p.stop() }
-            }
-        }
-
-        let reg = MediaSourceRegistration(source: source, video: videoSlot, audio: audioSlot)
-        let id = ObjectIdentifier(reg)
-        mediaSources[id] = reg
-        if let v = videoSlot { slotToMediaSource[v] = id }
-        if let a = audioSlot { slotToMediaSource[a] = id }
-
-        // Reentrancy: stop() may have run during the async makeProducer-free path
-        // is gone, but we keep the guard for symmetry with attach().
-        guard state != .stopped else {
-            evictMediaSource(id)
-            return
-        }
-
-        // The initial HELLO usually fires before the orchestrator attaches any
-        // MediaSource, so the shim's per-slot info (format, features) is
-        // empty. Re-publish whenever sources change so the shim sees current
-        // declared formats and feature flags.
-        if let client = self.client {
-            sendHello(producers: producers, media: Array(mediaSources.values), client: client)
-        }
-
-        let anyWanted = (videoSlot.map { slotsWantedByShim.contains($0) } ?? false)
-                     || (audioSlot.map { slotsWantedByShim.contains($0) } ?? false)
-        if anyWanted, let client = self.client {
-            startMediaSource(reg, client: client)
-        }
-    }
-
-    private func evictMediaSource(_ id: ObjectIdentifier) {
-        guard let reg = mediaSources.removeValue(forKey: id) else { return }
-        if let v = reg.videoSlot {
-            slotToMediaSource.removeValue(forKey: v)
-            videoSinks.removeValue(forKey: v)
-            runningProducers.remove(v)
-        }
-        if let a = reg.audioSlot {
-            slotToMediaSource.removeValue(forKey: a)
-            runningProducers.remove(a)
-        }
-        reg.fanout.setVideoSink(nil)
-        reg.fanout.setAudioSink(nil)
-        if reg.running {
-            reg.source.stop()
-        }
-    }
-
-    private func startMediaSource(_ reg: MediaSourceRegistration, client: SocketClient) {
-        if reg.running { return }
-        if let v = reg.videoSlot, let idx = v.wireIndex, slotsWantedByShim.contains(v) {
-            bindVideoSlot(reg: reg, slot: v, wireIndex: idx, client: client)
-        }
-        if let a = reg.audioSlot, let idx = a.wireIndex, slotsWantedByShim.contains(a) {
-            bindAudioSlot(reg: reg, slot: a, wireIndex: idx, client: client)
-        }
-        do {
-            try reg.source.start(into: reg.fanout)
-            reg.running = true
-            if let v = reg.videoSlot, reg.videoSink != nil { runningProducers.insert(v) }
-            if let a = reg.audioSlot, reg.audioSink != nil { runningProducers.insert(a) }
-            if let v = reg.videoSlot, let af = lastActiveFormat[v] {
-                reg.source.reformat(to: af)
-            }
-            log.notice("started media source: video=\(reg.videoSlot?.debugLabel ?? "-") audio=\(reg.audioSlot?.debugLabel ?? "-")")
-        } catch {
-            log.warn("media source failed to start: \(error)")
-            reg.fanout.setVideoSink(nil)
-            reg.fanout.setAudioSink(nil)
-            reg.videoSink = nil
-            reg.audioSink = nil
-        }
-    }
-
-    private func bindVideoSlot(reg: MediaSourceRegistration, slot: CameraSlot, wireIndex idx: UInt32, client: SocketClient) {
-        let initialFormat = lastActiveFormat[slot]
-            ?? reg.source.declaredVideoFormat
-            ?? VideoSlotFormat(width: 1280, height: 720, pixelFormat: .yuv420FullRange, fps: 30)
-        let socketSink = VideoSlotBoundSink(wireIndex: idx, declaredFormat: initialFormat, client: client, heartbeat: heartbeat)
-        let routed = DetectionRouter(slot: idx, downstream: socketSink, demand: demandRegistry, detector: hostDetector)
-        reg.fanout.setVideoSink(routed)
-        reg.videoSink = socketSink
-        videoSinks[slot] = socketSink
-    }
-
-    private func bindAudioSlot(reg: MediaSourceRegistration, slot: CameraSlot, wireIndex idx: UInt32, client: SocketClient) {
-        let format = reg.source.declaredAudioFormat ?? AudioSlotFormat(sampleRate: 48000, channels: 1)
-        let sink = AudioSlotBoundSink(wireIndex: idx, declaredFormat: format, client: client, heartbeat: heartbeat)
-        reg.fanout.setAudioSink(sink)
-        reg.audioSink = sink
-    }
-
-    private func stopMediaSource(_ reg: MediaSourceRegistration) {
-        reg.fanout.setVideoSink(nil)
-        reg.fanout.setAudioSink(nil)
-        reg.videoSink = nil
-        reg.audioSink = nil
-        if let v = reg.videoSlot {
-            runningProducers.remove(v)
-            videoSinks.removeValue(forKey: v)
-        }
-        if let a = reg.audioSlot { runningProducers.remove(a) }
-        if reg.running {
-            reg.source.stop()
-            reg.running = false
-        }
+        sources.attachMediaSource(source, video: videoSlot, audio: audioSlot, isStopped: state == .stopped)
     }
 
     public func start(connectTimeout: TimeInterval = 10) async throws {
         guard state == .idle else { throw GeistCamError.alreadyStarted }
         state = .listening
-        let producersSnapshot = producers
-        let mediaSnapshot = Array(mediaSources.values)
+        let sourcesSnapshot = sources.snapshot()
 
         let client = SocketClient(path: socketPath)
         try await client.connect(timeout: connectTimeout)
@@ -461,7 +146,7 @@ public actor GeistCamSession: SessionDriving {
         state = .connected
 
         delegate?.sessionDidConnect(self)
-        sendHello(producers: producersSnapshot, media: mediaSnapshot, client: client)
+        sources.connect(client, snapshot: sourcesSnapshot)
         startInboundTask(client: client)
         startStreamingWatchdog()
     }
@@ -530,14 +215,14 @@ public actor GeistCamSession: SessionDriving {
     }
 
     private func cleanUpConnection(client: SocketClient?, inboundTask: Task<Void, Never>?) {
-        let active = runningProducers
-        let prods = producers
-        let media = Array(mediaSources.values)
+        let controls = pendingControlRequests.values
+        pendingControlRequests.removeAll()
+        for control in controls {
+            control.resume(throwing: GeistCamError.notStarted)
+        }
         self.client = nil
         self.inboundTask = nil
-        runningProducers.removeAll()
-        for slot in active { prods[slot]?.stop() }
-        for reg in media { stopMediaSource(reg) }
+        sources.disconnect()
         inboundTask?.cancel()
         client?.close()
         stopStreamingWatchdog()
@@ -574,7 +259,7 @@ public actor GeistCamSession: SessionDriving {
         delegate?.session(self, isStreamingChanged: active)
     }
 
-    private func makeProducer(for source: GeistCamSource, slot: CameraSlot) async -> AnyProducer? {
+    private func makeProducer(for source: GeistCamSource, slot: CameraSlot) async -> CameraSourceRegistry.Producer? {
         let isAudioSlot = (slot == .microphone)
         switch source {
         case .customVideo(let p):
@@ -625,58 +310,6 @@ public actor GeistCamSession: SessionDriving {
         }
     }
 
-    private func sendHello(producers: [CameraSlot: AnyProducer],
-                            media: [MediaSourceRegistration],
-                            client: SocketClient) {
-        var slots: [WireSlotInfo] = []
-        for (slot, producer) in producers {
-            guard let idx = slot.wireIndex else { continue }
-            switch producer {
-            case .video(let p):
-                let f = p.declaredFormat
-                slots.append(WireSlotInfo(
-                    kind: UInt32(idx),
-                    width: UInt32(f.width), height: UInt32(f.height),
-                    pixelFormat: f.pixelFormat.osType,
-                    fpsNum: UInt32(f.fps), fpsDen: 1,
-                    features: 0
-                ))
-            case .audio(let p):
-                let f = p.declaredFormat
-                slots.append(WireSlotInfo(
-                    kind: UInt32(idx),
-                    width: 0, height: UInt32(f.channels),
-                    pixelFormat: 0,
-                    fpsNum: UInt32(f.sampleRate), fpsDen: 1,
-                    features: 0
-                ))
-            }
-        }
-        for reg in media {
-            let features = reg.source.features.rawValue
-            if let v = reg.videoSlot, let idx = v.wireIndex, let f = reg.source.declaredVideoFormat {
-                slots.append(WireSlotInfo(
-                    kind: UInt32(idx),
-                    width: UInt32(f.width), height: UInt32(f.height),
-                    pixelFormat: f.pixelFormat.osType,
-                    fpsNum: UInt32(f.fps), fpsDen: 1,
-                    features: features
-                ))
-            }
-            if let a = reg.audioSlot, let idx = a.wireIndex, let f = reg.source.declaredAudioFormat {
-                slots.append(WireSlotInfo(
-                    kind: UInt32(idx),
-                    width: 0, height: UInt32(f.channels),
-                    pixelFormat: 0,
-                    fpsNum: UInt32(f.sampleRate), fpsDen: 1,
-                    features: features
-                ))
-            }
-        }
-        let hello = WireHello(slots: slots)
-        _ = client.send(.reliable(type: .hello, payload: hello.encoded()))
-    }
-
     private func startInboundTask(client: SocketClient) {
         inboundTask = Task { [weak self] in
             for await msg in client.inbound {
@@ -710,7 +343,7 @@ public actor GeistCamSession: SessionDriving {
             isRecording.store(recording, ordering: .relaxed)
         case .activeFormat:
             guard let m = WireActiveFormat.decode(msg.payload) else { return }
-            handleActiveFormatChanged(m)
+            sources.updateActiveFormat(m)
         case .controlResponse:
             handleControlResponse(msg.payload)
         default:
@@ -738,122 +371,9 @@ public actor GeistCamSession: SessionDriving {
         continuation.resume(returning: data)
     }
 
-    private func handleActiveFormatChanged(_ m: WireActiveFormat) {
-        let slot = slotForWireIndex(m.slot)
-        guard let pixfmt = PixelFormat(osType: m.pixelFormat) else {
-            log.warn("ACTIVE_FORMAT slot=\(m.slot): unsupported pixfmt 0x\(String(m.pixelFormat, radix: 16))")
-            return
-        }
-        let fps: Int
-        if case .video(let p) = producers[slot] {
-            fps = p.declaredFormat.fps
-        } else if let id = slotToMediaSource[slot],
-                  let reg = mediaSources[id],
-                  let dvf = reg.source.declaredVideoFormat {
-            fps = dvf.fps
-        } else {
-            fps = 30
-        }
-        let target = VideoSlotFormat(width: Int(m.width), height: Int(m.height),
-                                     pixelFormat: pixfmt, fps: fps)
-        log.notice("ACTIVE_FORMAT slot=\(slot.debugLabel) → \(m.width)x\(m.height) \(pixfmt)")
-        lastActiveFormat[slot] = target
-        videoSinks[slot]?.updateExpectedFormat(target)
-        if case .video(let p) = producers[slot] {
-            p.reformat(to: target)
-        }
-        if let id = slotToMediaSource[slot], let reg = mediaSources[id] {
-            reg.source.reformat(to: target)
-        }
-    }
-
     private func applySlotActive(wireIndex: UInt32, active: Bool) {
-        let slot = slotForWireIndex(wireIndex)
-        if active { slotsWantedByShim.insert(slot) } else { slotsWantedByShim.remove(slot) }
-
-        if let id = slotToMediaSource[slot], let reg = mediaSources[id] {
-            handleMediaSlotActive(reg: reg, slot: slot, active: active)
-            return
-        }
-
-        let producer = producers[slot]
-        let alreadyRunning = runningProducers.contains(slot)
-        let shouldLogMissing = active && producer == nil && !loggedActivationsWithoutSource.contains(slot)
-        if shouldLogMissing { loggedActivationsWithoutSource.insert(slot) }
-
-        if shouldLogMissing {
-            log.notice("slot '\(slot.debugLabel)' activated with no source — preview will be blank")
-            delegate?.session(self, didActivateSlotWithoutSource: slot)
-        }
-        guard let producer else { return }
-        if active && !alreadyRunning {
-            startProducer(producer, for: slot)
-        } else if !active && alreadyRunning {
-            stopProducer(producer, for: slot)
-        }
-    }
-
-    private func handleMediaSlotActive(reg: MediaSourceRegistration, slot: CameraSlot, active: Bool) {
-        guard let client else { return }
-        let isVideo = (slot == reg.videoSlot)
-        let isAudio = (slot == reg.audioSlot)
-        if active {
-            if !reg.running {
-                startMediaSource(reg, client: client)
-                return
-            }
-            if isVideo, reg.videoSink == nil, let idx = slot.wireIndex {
-                bindVideoSlot(reg: reg, slot: slot, wireIndex: idx, client: client)
-                runningProducers.insert(slot)
-                if let af = lastActiveFormat[slot] { reg.source.reformat(to: af) }
-            }
-            if isAudio, reg.audioSink == nil, let idx = slot.wireIndex {
-                bindAudioSlot(reg: reg, slot: slot, wireIndex: idx, client: client)
-                runningProducers.insert(slot)
-            }
-        } else {
-            if isVideo {
-                reg.fanout.setVideoSink(nil)
-                reg.videoSink = nil
-                videoSinks.removeValue(forKey: slot)
-                runningProducers.remove(slot)
-            }
-            if isAudio {
-                reg.fanout.setAudioSink(nil)
-                reg.audioSink = nil
-                runningProducers.remove(slot)
-            }
-            if reg.videoSink == nil && reg.audioSink == nil {
-                stopMediaSource(reg)
-            }
-        }
-    }
-
-    private func startProducer(_ producer: AnyProducer, for slot: CameraSlot) {
-        guard let idx = slot.wireIndex else { return }
-        guard let client else { return }
-        do {
-            switch producer {
-            case .video(let p):
-                let initialFormat = lastActiveFormat[slot] ?? p.declaredFormat
-                let socketSink = VideoSlotBoundSink(wireIndex: idx, declaredFormat: initialFormat, client: client, heartbeat: heartbeat)
-                videoSinks[slot] = socketSink
-                let routedSink = DetectionRouter(slot: idx,
-                                                  downstream: socketSink,
-                                                  demand: demandRegistry,
-                                                  detector: hostDetector)
-                try p.start(into: routedSink)
-                if let af = lastActiveFormat[slot] {
-                    p.reformat(to: af)
-                }
-            case .audio(let p):
-                let sink = AudioSlotBoundSink(wireIndex: idx, declaredFormat: p.declaredFormat, client: client, heartbeat: heartbeat)
-                try p.start(into: sink)
-            }
-            runningProducers.insert(slot)
-            log.notice("started producer for \(slot.debugLabel)")
-        } catch {
-            log.warn("producer failed to start for \(slot.debugLabel): \(error)")
+        if let missingSlot = sources.setSlotActive(wireIndex: wireIndex, active: active) {
+            delegate?.session(self, didActivateSlotWithoutSource: missingSlot)
         }
     }
 
@@ -862,32 +382,12 @@ public actor GeistCamSession: SessionDriving {
         _ = client.send(.reliable(type: .metadataResults, payload: results.encoded()))
     }
 
-    private func stopProducer(_ producer: AnyProducer, for slot: CameraSlot) {
-        producer.stop()
-        runningProducers.remove(slot)
-        videoSinks.removeValue(forKey: slot)
-        log.notice("stopped producer for \(slot.debugLabel)")
-    }
-
     private func handleDisconnected(client disconnectedClient: SocketClient) {
         if client === disconnectedClient {
-            let controls = pendingControlRequests.values
-            pendingControlRequests.removeAll()
-            for control in controls {
-                control.resume(throwing: GeistCamError.notStarted)
-            }
             state = .stopped
             cleanUpConnection(client: disconnectedClient, inboundTask: inboundTask)
         }
         delegate?.sessionDidDisconnect(self)
     }
 
-    private nonisolated func slotForWireIndex(_ idx: UInt32) -> CameraSlot {
-        switch idx {
-        case 0: return .backCamera
-        case 1: return .frontCamera
-        case 2: return .microphone
-        default: return .backCamera
-        }
-    }
 }
