@@ -134,7 +134,7 @@ void deliverFrameToPreviewLayers(CMSampleBufferRef sb, GeistCamSource *src) {
         }
         // Each preview layer has its own connection with independent rotation/
         // mirror state — front-camera previews are typically auto-mirrored.
-        TransformParams params = transformParamsForConnection(layer.connection);
+        TransformParams params = transformParamsForConnection(layer.connection, GeistCamTransformDeliveryPresentation);
         CMSampleBufferRef transformed = applyTransformToSampleBuffer(sb, params);
         CMSampleBufferRef toEnqueue = transformed ?: sb;
 

@@ -1,6 +1,7 @@
 #import "Transform.h"
 #import "ActiveFormat.h"
 #import "TransformPlan.h"
+#import "ImageTransform.h"
 #import "RotationCoordinator.h"
 #import "Server.h"
 #import "Source.h"
@@ -36,20 +37,14 @@ static void logXformStatsIfDue(int64_t call) {
 }
 
 static BOOL transformIsIdentity(TransformParams p) {
-    return p.rotationDegrees == 0 && !p.mirrored && p.zoomFactor <= 1.0001;
+    return !p.mirrored && p.zoomFactor <= 1.0001;
 }
 
-// Producers ship frames upright; we reshape to the orientation the app asked
-// for via connection.videoRotationAngle. iPhone-style aspect-fill (cover +
-// center-crop).
-TransformParams transformParamsForConnection(AVCaptureConnection *conn) {
-    // The iPhone camera HW rotates buffers to match the device's current
-    // orientation, leaving connection.videoRotationAngle at 0 in practice.
-    // The shim emulates that: rotation comes from the active UIWindowScene's
-    // interfaceOrientation, NOT from the connection.
-    TransformParams p = (TransformParams){ .rotationDegrees = 0, .mirrored = NO,
+TransformParams transformParamsForConnection(AVCaptureConnection *conn, GeistCamTransformDelivery delivery) {
+    TransformParams p = (TransformParams){ .delivery = delivery, .rotationDegrees = 0, .mirrored = NO,
         .zoomFactor = 1.0, .targetWidth = 0, .targetHeight = 0 };
-    p.rotationDegrees = geistcam_currentCaptureRotationDegrees();
+    p.rotationDegrees = delivery == GeistCamTransformDeliveryDataOutput
+        ? conn.videoRotationAngle : geistcam_currentCaptureRotationDegrees();
     if (conn) {
         AVCaptureDevice *device = firstDeviceInPorts(conn.inputPorts);
         if (device) {
@@ -123,43 +118,20 @@ CMSampleBufferRef applyTransformToSampleBuffer(CMSampleBufferRef sb, TransformPa
     size_t inH = CVPixelBufferGetHeight(pb);
     OSType inFmt = CVPixelBufferGetPixelFormatType(pb);
 
-    GeistCamTransformPlan plan = geistcam_computeTransformPlan(
+    GeistCamTransformPlan plan = params.delivery == GeistCamTransformDeliveryDataOutput
+        ? geistcam_computePortraitDataOutputPlan(
+            (int)inW, (int)inH, params.targetWidth, params.targetHeight, (int)params.rotationDegrees)
+        : geistcam_computeTransformPlan(
         (int)inW, (int)inH,
         params.targetWidth, params.targetHeight,
         (int)params.rotationDegrees);
     if (transformIsIdentity(params) && plan.isIdentity) return NULL;
 
-    CIImage *img = [CIImage imageWithCVPixelBuffer:pb];
-    CGRect inExtent = img.extent;
-
-    if (params.mirrored) {
-        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
-        img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(inExtent.size.width, 0)];
-    }
-
-    if (params.zoomFactor > 1.0001) {
-        CGFloat z = params.zoomFactor;
-        CGRect e = img.extent;
-        CGFloat cropW = e.size.width / z;
-        CGFloat cropH = e.size.height / z;
-        CGRect crop = CGRectMake(e.origin.x + (e.size.width - cropW) / 2,
-                                 e.origin.y + (e.size.height - cropH) / 2,
-                                 cropW, cropH);
-        img = [img imageByCroppingToRect:crop];
-        img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(-crop.origin.x, -crop.origin.y)];
-        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(z, z)];
-    }
+    CIImage *img = geistcam_imageByApplyingTransformPlan(
+        [CIImage imageWithCVPixelBuffer:pb], plan, params.mirrored, params.zoomFactor);
 
     size_t outW = (size_t)plan.outputW;
     size_t outH = (size_t)plan.outputH;
-
-    if (!plan.isIdentity) {
-        CGRect crop = CGRectMake(plan.sourceCrop.x, plan.sourceCrop.y,
-                                  plan.sourceCrop.w, plan.sourceCrop.h);
-        img = [img imageByCroppingToRect:crop];
-        img = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(-crop.origin.x, -crop.origin.y)];
-        img = [img imageByApplyingTransform:CGAffineTransformMakeScale(plan.scale, plan.scale)];
-    }
 
     CVPixelBufferRef outPB = NULL;
     CVPixelBufferPoolRef pool = poolForDims(outW, outH, inFmt);

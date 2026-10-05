@@ -14,6 +14,7 @@ typedef struct {
     int outputH;
     GeistCamRect sourceCrop;   // image coords (top-left origin); symmetric so CI's Y-up doesn't matter
     double scale;
+    int pixelRotationDegrees;
     bool isIdentity;
 } GeistCamTransformPlan;
 
@@ -27,6 +28,12 @@ GeistCamTransformPlan geistcam_computeTransformPlan(
     int inputW, int inputH,
     int activeFormatW, int activeFormatH,
     int rotationDegrees);
+
+GeistCamTransformPlan geistcam_computePortraitDataOutputPlan(
+    int inputW, int inputH, int activeFormatW, int activeFormatH,
+    int connectionRotationDegrees);
+
+int geistcam_portraitCaptureRotationDegrees(void);
 
 // Combines a source's feature bitset with the iOS app's connection.videoMirrored
 // to decide whether the shim should apply a horizontal flip. Only live-capture

@@ -52,7 +52,7 @@ let package = Package(
             name: "GeistCameraShimCore",
             path: "GeistLens/Sources/GeistCameraShimCore",
             publicHeadersPath: "include",
-            linkerSettings: [.linkedFramework("AudioToolbox")]
+            linkerSettings: [.linkedFramework("AudioToolbox"), .linkedFramework("CoreImage")]
         ),
 
         .target(

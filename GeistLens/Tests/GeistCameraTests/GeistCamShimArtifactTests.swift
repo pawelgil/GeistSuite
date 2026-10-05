@@ -17,6 +17,15 @@ struct GeistCamShimArtifactTests {
 
     // MARK: Functions
 
+    @Test(arguments: ["geistcam_computePortraitDataOutputPlan", "geistcam_imageByApplyingTransformPlan"])
+    func cameraTransform_BundledDylib_DefinesRenderingSymbols(symbol: String) throws {
+        let output = try nmOutput(for: GeistCamShimBundled.dylibPath)
+
+        #expect(output.split(separator: "\n").contains {
+            $0.contains("(__TEXT,__text)") && containsSymbol("_\(symbol)", in: String($0))
+        })
+    }
+
     @Test(arguments: [
         "AudioComponentInstanceNew", "AudioComponentInstanceDispose", "AudioUnitSetProperty",
         "AudioUnitInitialize", "AudioOutputUnitStart", "AudioOutputUnitStop", "AudioUnitRender",

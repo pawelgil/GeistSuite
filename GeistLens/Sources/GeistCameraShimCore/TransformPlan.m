@@ -11,6 +11,7 @@ GeistCamTransformPlan geistcam_computeTransformPlan(
     plan.outputH = 0;
     plan.sourceCrop = (GeistCamRect){0, 0, 0, 0};
     plan.scale = 1.0;
+    plan.pixelRotationDegrees = 0;
     plan.isIdentity = true;
 
     if (inputW <= 0 || inputH <= 0) {
@@ -57,6 +58,29 @@ GeistCamTransformPlan geistcam_computeTransformPlan(
     plan.sourceCrop.y = (inputH - cropH) / 2;
     plan.scale = (double)plan.outputW / (double)cropW;
     plan.isIdentity = false;
+    return plan;
+}
+
+int geistcam_portraitCaptureRotationDegrees(void)
+{
+    return 90;
+}
+
+GeistCamTransformPlan geistcam_computePortraitDataOutputPlan(
+    int inputW, int inputH, int activeFormatW, int activeFormatH,
+    int connectionRotationDegrees)
+{
+    // Upright portrait is +90 degrees from sensor space: https://developer.apple.com/videos/play/wwdc2023/10106/
+    int rotation = (connectionRotationDegrees + 270) % 360;
+    bool swapsDimensions = rotation == 90 || rotation == 270;
+    int rotatedW = swapsDimensions ? inputH : inputW;
+    int rotatedH = swapsDimensions ? inputW : inputH;
+    int sensorW = activeFormatW > 0 ? activeFormatW : inputH;
+    int sensorH = activeFormatH > 0 ? activeFormatH : inputW;
+    GeistCamTransformPlan plan = geistcam_computeTransformPlan(
+        rotatedW, rotatedH, sensorW, sensorH, connectionRotationDegrees);
+    plan.pixelRotationDegrees = rotation;
+    plan.isIdentity = plan.isIdentity && rotation == 0;
     return plan;
 }
 

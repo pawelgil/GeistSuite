@@ -1,4 +1,5 @@
 #import "RotationCoordinator.h"
+#import "TransformPlan.h"
 #import "Util.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
@@ -73,16 +74,12 @@ static id swiz_initWithDevicePreviewLayer(id self, SEL _cmd, id device, id previ
     return result;
 }
 
-// Real iPhone hardware rotates the buffer to match device orientation, leaving
-// nothing for the app to do — so RotationCoordinator effectively returns 0.
-// The shim emulates the HW rotation in Transform.m using UIScene orientation
-// directly; we mirror the iPhone-side contract by also returning 0 here.
 static double swiz_videoRotationAngleForHorizonLevelCapture(id self, SEL _cmd) {
-    return 0;
+    return geistcam_portraitCaptureRotationDegrees();
 }
 
 static double swiz_videoRotationAngleForHorizonLevelPreview(id self, SEL _cmd) {
-    return 0;
+    return geistcam_portraitCaptureRotationDegrees();
 }
 
 void installRotationCoordinatorSwizzles(void) {

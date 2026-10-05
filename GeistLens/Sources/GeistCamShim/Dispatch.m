@@ -44,8 +44,10 @@ void deliverToBoundOutputs(GeistCamSource *src, CMSampleBufferRef sb, CMTime ori
 
         AVCaptureConnection *videoConn = (src->kind != GeistCamSourceKind_Audio)
             ? firstVideoConnectionForOutput(output) : nil;
+        GeistCamTransformDelivery delivery = [output isKindOfClass:[AVCaptureVideoDataOutput class]]
+            ? GeistCamTransformDeliveryDataOutput : GeistCamTransformDeliveryPresentation;
         CMSampleBufferRef transformed = videoConn
-            ? applyTransformToSampleBuffer(sb, transformParamsForConnection(videoConn))
+            ? applyTransformToSampleBuffer(sb, transformParamsForConnection(videoConn, delivery))
             : NULL;
         CMSampleBufferRef toDeliver = transformed ?: sb;
 
