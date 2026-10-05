@@ -80,6 +80,7 @@ struct BuildShim: BuildToolPlugin {
             "-framework", "CoreMedia",
             "-framework", "CoreVideo",
             "-framework", "AVFoundation",
+            "-framework", "AudioToolbox",
             "-Wl,-undefined,dynamic_lookup",
             "-fobjc-arc",
             "-O0", "-g",

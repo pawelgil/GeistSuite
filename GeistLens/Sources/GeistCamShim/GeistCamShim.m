@@ -4,6 +4,7 @@
 // FigCaptureSession is intentionally NOT patched — we never let it set up.
 
 #import <Foundation/Foundation.h>
+#import "AudioInput.h"
 #import "AssetWriterSwizzles.h"
 #import "Metadata.h"
 #import "Outputs.h"
@@ -36,13 +37,15 @@ static BOOL hostAppHasCameraIntent(void) {
 
 __attribute__((constructor))
 static void geistcam_init(void) {
-    if (!hostAppHasCameraIntent()) return;
+    BOOL camera = hostAppHasCameraIntent();
+    BOOL microphone = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSMicrophoneUsageDescription"] != nil;
+    if (!camera && !microphone) return;
     geistcam_marker("dylib loaded");
-    if (!installSourceEnumerationHook()) {
-        geistcam_warnf("camera source enumeration unsupported — camera hooks disabled");
-        return;
+    audioInputEnable();
+    if (camera) {
+        if (installSourceEnumerationHook()) installAVFSwizzles();
+        else geistcam_warnf("camera source enumeration unsupported — camera hooks disabled");
     }
-    installAVFSwizzles();
     if (!startServerIfConfigured()) {
         geistcam_warnf("no socket path — set GEISTCAM_SOCKET, or set "
                          "SIMULATOR_UDID + run inside a real simulator app");

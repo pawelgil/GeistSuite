@@ -1,9 +1,35 @@
 import Foundation
-import Testing
 @testable import GeistCamera
+import Testing
 
-@Suite("GeistCamShim artifact")
 struct GeistCamShimArtifactTests {
+    // MARK: Computed Properties
+
+    private var dynamicallyResolvedSymbols: [String] {
+        [
+            "kFigCaptureSourceAttributeKey_LocalizedName",
+            "kFigCaptureSourceAttributeKey_MaxFrameRate",
+            "kFigCaptureSourceAttributeKey_MinFrameRate",
+            "kFigCaptureSourceProperty_Attributes",
+            "kFigCaptureSourceProperty_AttributesDictionary",
+        ]
+    }
+
+    // MARK: Functions
+
+    @Test(arguments: [
+        "AudioComponentInstanceNew", "AudioComponentInstanceDispose", "AudioUnitSetProperty",
+        "AudioUnitInitialize", "AudioOutputUnitStart", "AudioOutputUnitStop", "AudioUnitRender",
+    ])
+    func audioInput_BundledDylib_DefinesCaptureAndBufferSymbols(interposed: String) throws {
+        let output = try nmOutput(for: GeistCamShimBundled.dylibPath)
+        let lines = output.split(separator: "\n").map(String.init)
+
+        #expect(lines.contains { $0.contains("(__TEXT,__text)") && containsSymbol("_audioInputEnable", in: $0) })
+        #expect(lines.contains { $0.contains("(__TEXT,__text)") && containsSymbol("_geistAudioInputBufferRender", in: $0) })
+        #expect(lines.contains { containsSymbol("_interpose_\(interposed)", in: $0) })
+    }
+
     @Test func removedCMCaptureSymbols_bundledDylib_areWeakOrDynamicallyResolved() throws {
         let output = try nmOutput(for: GeistCamShimBundled.dylibPath)
         let lines = output.split(separator: "\n").map(String.init)
@@ -35,15 +61,5 @@ struct GeistCamShimArtifactTests {
 
     private func containsSymbol(_ symbol: String, in line: String) -> Bool {
         line.split(whereSeparator: { $0.isWhitespace }).contains(Substring(symbol))
-    }
-
-    private var dynamicallyResolvedSymbols: [String] {
-        [
-            "kFigCaptureSourceAttributeKey_LocalizedName",
-            "kFigCaptureSourceAttributeKey_MaxFrameRate",
-            "kFigCaptureSourceAttributeKey_MinFrameRate",
-            "kFigCaptureSourceProperty_Attributes",
-            "kFigCaptureSourceProperty_AttributesDictionary",
-        ]
     }
 }

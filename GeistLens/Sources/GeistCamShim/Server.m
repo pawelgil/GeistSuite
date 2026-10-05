@@ -1,4 +1,5 @@
 #import "Server.h"
+#import "AudioInput.h"
 #import "ActiveFormat.h"
 #import "Dispatch.h"
 #import "Metadata.h"
@@ -115,11 +116,11 @@ void serverNotifySlotActive(GeistCamSlot slot, BOOL active) {
 
 void serverRecomputeAllSlots(void) {
     if (!s_serverConfigured) return;
-    for (int i = 0; i < simSourceCount() && i < GEISTCAM_SLOT_COUNT; i++) {
-        GeistCamSource *src = simSourceAtIndex(i);
-        if (!src) continue;
-        BOOL active = isSourceActive(src);
-        serverNotifySlotActive((GeistCamSlot)src->kind, active);
+    for (int i = 0; i < GEISTCAM_SLOT_COUNT; i++) {
+        GeistCamSource *src = findSourceByKind((GeistCamSourceKind)i);
+        BOOL active = src && isSourceActive(src);
+        if (i == GeistCamSourceKind_Audio) active = active || audioInputIsActive();
+        serverNotifySlotActive((GeistCamSlot)i, active);
     }
 }
 
@@ -139,6 +140,7 @@ static void *acceptThread(void *arg) {
         pthread_mutex_unlock(&s_connMutex);
 
         readLoop(fd);
+        audioInputDiscard();
 
         pthread_mutex_lock(&s_connMutex);
         if (s_conn_fd == fd) s_conn_fd = -1;
@@ -280,6 +282,7 @@ static void handleHello(uint32_t version, uint32_t slotCount, const uint8_t *slo
                           info.kind, info.width, info.height,
                           info.fps_num, info.fps_den, info.pixel_format, info.features);
     }
+    audioInputConfigure(s_slotConfigured[GeistCamSourceKind_Audio]);
     // Recompute under helloReceived=NO so SLOT_ACTIVE doesn't race ahead of
     // HELLO_ACK on the wire — the ack must arrive first.
     serverRecomputeAllSlots();
@@ -466,7 +469,9 @@ static void handleVideoFrame(const GeistCamVideoFrameMsg *hdr, const uint8_t *by
 }
 
 static void handleAudioFrame(const GeistCamAudioFrameMsg *hdr, const uint8_t *bytes) {
-    if (hdr->slot >= GEISTCAM_SLOT_COUNT) return;
+    if (hdr->slot != GeistCamSourceKind_Audio) return;
+    audioInputReceive(bytes, hdr->bytes_len, hdr->sample_count, hdr->channels,
+                      hdr->sample_rate, hdr->bits_per_channel, hdr->format);
     GeistCamSource *src = findSourceByKind((GeistCamSourceKind)hdr->slot);
     if (!src || src->kind != GeistCamSourceKind_Audio) return;
 
