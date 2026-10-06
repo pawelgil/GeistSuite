@@ -1,5 +1,6 @@
 #import "LifecycleDriver.h"
 #import "ShimLog.h"
+#import "AppGroupContainerAliases.h"
 
 #import <Foundation/Foundation.h>
 #include <unistd.h>
@@ -14,6 +15,7 @@ os_log_t gc_log(void) {
 __attribute__((constructor))
 static void GeistBroadcastExtensionShim_Init(void) {
     @autoreleasepool {
+        [GCAppGroupContainerAliases install];
         GC_LOG("+ctor pid=%d bundle=%{public}@",
                getpid(), [[NSBundle mainBundle] bundleIdentifier] ?: @"?");
         GC_StartLifecycleDriver();

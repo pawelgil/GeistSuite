@@ -3,6 +3,7 @@
 #import "FakeIsCaptured.h"
 #import "ControlSocket.h"
 #import "ShimLog.h"
+#import "AppGroupContainerAliases.h"
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -18,6 +19,7 @@ os_log_t gc_log(void) {
 __attribute__((constructor))
 static void GeistBroadcastAppShim_Init(void) {
     @autoreleasepool {
+        [GCAppGroupContainerAliases install];
         GC_LOG("+ctor pid=%d bundle=%{public}@",
                getpid(), [[NSBundle mainBundle] bundleIdentifier] ?: @"?");
 

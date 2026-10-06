@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "AppGroupContainerAliases.h"
 
 // Wire frame header magic, little-endian 'GCST'. Both the host (Swift) and
 // the simulator-side shim (Obj-C) verify against this exact value; the
