@@ -3,6 +3,7 @@
 #import "RecordingState.h"
 #import "Util.h"
 #import "WriterTracker.h"
+#import "GMMediaFaults.h"
 #import <AVFoundation/AVFoundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -25,6 +26,7 @@ static BOOL swiz_writer_startWriting(id self, SEL _cmd) {
         : YES;
     geistcam_debugf("AVAssetWriter startWriting: writer=%p url=%s ok=%d",
                      self, [(AVAssetWriter *)self outputURL].path.UTF8String ?: "(nil)", ok);
+    if (ok) [[GMMediaFaults controller] writerStarted:self];
     return ok;
 }
 
@@ -37,6 +39,7 @@ static void swiz_writer_addInput(id self, SEL _cmd, AVAssetWriterInput *input) {
 }
 
 static BOOL swiz_input_appendSampleBuffer(id self, SEL _cmd, CMSampleBufferRef sb) {
+    if ([GMMediaFaults rejectAppendForWriter:writerForInput(self) mediaType:[(AVAssetWriterInput *)self mediaType]]) return NO;
     if (sb && sampleBufferHasOurProvenance(sb)) {
         AVAssetWriter *writer = writerForInput(self);
         if (writer) recordingAssetWriterFlagged(writer);
@@ -47,6 +50,9 @@ static BOOL swiz_input_appendSampleBuffer(id self, SEL _cmd, CMSampleBufferRef s
 }
 
 void installAssetWriterSwizzles(void) {
+    [GMMediaFaults installWithWriterErrorCode:-11800 underlyingCode:-19649 exportHooks:YES logger:^(NSString *message) {
+        geistcam_markerf("%s", message.UTF8String);
+    }];
     if (!s_inputToWriter) {
         s_inputToWriter = [NSMapTable mapTableWithKeyOptions:NSMapTableWeakMemory
                                                 valueOptions:NSMapTableWeakMemory];

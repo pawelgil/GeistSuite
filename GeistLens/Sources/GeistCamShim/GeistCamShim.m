@@ -24,7 +24,6 @@ static void installAVFSwizzles(void) {
     installPhotoSwizzles();
     installMetadataSwizzles();
     installCapabilitySwizzles();
-    installAssetWriterSwizzles();
     installRotationCoordinatorSwizzles();
 }
 
@@ -43,6 +42,7 @@ static void geistcam_init(void) {
     geistcam_marker("dylib loaded");
     audioInputEnable();
     if (camera) {
+        installAssetWriterSwizzles();
         if (installSourceEnumerationHook()) installAVFSwizzles();
         else geistcam_warnf("camera source enumeration unsupported — camera hooks disabled");
     }

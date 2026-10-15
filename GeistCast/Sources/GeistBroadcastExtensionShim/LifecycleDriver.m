@@ -5,6 +5,7 @@
 #import "HandlerResolver.h"
 #import "ControlSocket.h"
 #import "ShimLog.h"
+#import "GMMediaFaults.h"
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
@@ -221,6 +222,15 @@ void GC_StartLifecycleDriver(void) {
             if ([type isEqual:@"finish"]) {
                 GC_LOG("received finish");
                 break;
+            }
+            if ([type isEqual:@"writer_fault"]) {
+                NSMutableDictionary *request = [msg mutableCopy];
+                request[@"kind"] = @"writer";
+                NSDictionary *result = [[GMMediaFaults controller] handle:request];
+                NSDictionary *response = @{@"type": @"writer_fault_response", @"requestID": msg[@"requestID"] ?: @"", @"data": result};
+                NSData *data = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+                GC_WriteControlLine([[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] stringByAppendingString:@"\n"]);
+                continue;
             }
             if ([type isEqual:@"pause"]) {
                 GC_LOG("received pause");

@@ -121,6 +121,8 @@ struct FrameHeader: Equatable, Sendable {
 }
 
 enum WireMessage: Equatable, Sendable {
+    case writerFault(requestID: String, options: Data)
+    case writerFaultResponse(requestID: String, data: Data)
     case broadcastStarted(Broadcast)
     case broadcastEnded(Broadcast)
     case helloHost
@@ -165,6 +167,17 @@ struct WireDecoder {
         else { return nil }
 
         switch type {
+        case "writer_fault", "writer_fault_response":
+            guard let requestID = json["requestID"] as? String else { return nil }
+            if type == "writer_fault_response" {
+                guard let value = json["data"], let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+                return .writerFaultResponse(requestID: requestID, data: data)
+            }
+            var options = json
+            options.removeValue(forKey: "type")
+            options.removeValue(forKey: "requestID")
+            guard let data = try? JSONSerialization.data(withJSONObject: options, options: .sortedKeys) else { return nil }
+            return .writerFault(requestID: requestID, options: data)
         case "started":
             return extractBroadcast(json).map(WireMessage.broadcastStarted)
         case "ended":
@@ -320,6 +333,13 @@ struct WireEncoder {
             return requestID.isEmpty ? ["type": "resume"] : ["type": "resume", "requestID": requestID]
         case .controlAck(let requestID):
             return ["type": "control_ack", "requestID": requestID]
+        case let .writerFault(requestID, options):
+            var object = (try? JSONSerialization.jsonObject(with: options) as? [String: Any]) ?? [:]
+            object["type"] = "writer_fault"
+            object["requestID"] = requestID
+            return object
+        case let .writerFaultResponse(requestID, data):
+            return ["type": "writer_fault_response", "requestID": requestID, "data": (try? JSONSerialization.jsonObject(with: data)) ?? [:]]
         case .extensionTerminated(let domain, let code, let message):
             return [
                 "type": "extension_terminated",

@@ -186,10 +186,19 @@ public actor GeistCamSession: SessionDriving {
         return try JSONDecoder().decode(CameraInterruptionChange.self, from: data)
     }
 
-    private func control(command: String, reason: Int? = nil, session: String? = nil) async throws -> Data {
+    public func mediaFault(_ options: Data) async throws -> Data {
+        guard let fields = try JSONSerialization.jsonObject(with: options) as? [String: Any] else {
+            throw CameraControlError(message: "Invalid media fault options")
+        }
+        return try await control(command: "mediaFault", fields: fields)
+    }
+
+    private func control(command: String, reason: Int? = nil, session: String? = nil, fields: [String: Any] = [:]) async throws -> Data {
         guard let client else { throw GeistCamError.notStarted }
         let requestID = UUID().uuidString
-        var request: [String: Any] = ["command": command, "requestID": requestID]
+        var request = fields
+        request["command"] = command
+        request["requestID"] = requestID
         if let reason { request["reason"] = reason }
         if let session { request["session"] = session }
         let payload = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])

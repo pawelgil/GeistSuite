@@ -8,6 +8,62 @@ import Testing
 
 @Suite(.serialized) struct GeistBroadcastSessionTests {
 
+    @Test func writerFault_Stop_FailsPendingRequest() async throws {
+        let (sut, client) = try await createRecordingSession()
+        defer { close(client) }
+        let pending = Task { try await sut.writerFault(Data(#"{"action":"status"}"#.utf8)) }
+        _ = try await readWireMessage(from: client)
+
+        await sut.stop()
+
+        await #expect(throws: GeistBroadcastSession.SessionError.notConnected) { try await pending.value }
+    }
+
+    @Test func writerFault_Replacement_FailsOldRequest() async throws {
+        let (sut, client) = try await createRecordingSession()
+        defer { close(client) }
+        let pending = Task { try await sut.writerFault(Data(#"{"action":"status"}"#.utf8)) }
+        _ = try await readWireMessage(from: client)
+        let replacement = try connectClient(toSocketOf: sut)
+        defer { close(replacement) }
+
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: replacement)
+
+        await #expect(throws: GeistBroadcastSession.SessionError.notConnected) { try await pending.value }
+        await sut.stop()
+    }
+
+    @Test func writerFault_Response_ReturnsPayload() async throws {
+        let (sut, client) = try await createRecordingSession()
+        defer { close(client) }
+        let pending = Task { try await sut.writerFault(Data(#"{"action":"status"}"#.utf8)) }
+        let request = try await readWireMessage(from: client)
+        guard case let .writerFault(requestID, _) = request else {
+            Issue.record("Expected writer fault request")
+            await sut.stop()
+            return
+        }
+        let status = Data(#"{"armed":false,"remainingCount":0,"firedCount":0}"#.utf8)
+
+        try sendMessage(.writerFaultResponse(requestID: requestID, data: status), to: client)
+
+        let result = try await pending.value
+        #expect(try JSONSerialization.jsonObject(with: result) as? NSDictionary == JSONSerialization.jsonObject(with: status) as? NSDictionary)
+        await sut.stop()
+    }
+
+    private func createRecordingSession() async throws -> (GeistBroadcastSession, Int32) {
+        let delegate = SpyDelegate()
+        let sut = createSUT(delegate: delegate)
+        try await sut.start()
+        let client = try connectClient(toSocketOf: sut)
+        try sendMessage(.helloExtension(extensionBundleID: "com.test.host.cast"), to: client)
+        await delegate.extensionConnected.wait()
+        try sendMessage(.broadcastStarted(makeBroadcast()), to: client)
+        await delegate.broadcastStarted.wait()
+        return (sut, client)
+    }
+
     @Test
     func socketPath_differentSimulators_yieldDifferentPaths() {
         let sutA = createSUT(simulator: "S1", hostBundleID: "com.b")
