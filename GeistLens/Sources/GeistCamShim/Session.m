@@ -8,12 +8,13 @@
 #import "Server.h"
 #import "Util.h"
 #import "GeistCameraSessionState.h"
+#import "GeistCameraInterruptionDelivery.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 static NSHashTable<AVCaptureSession *> *s_allSessions;
 static NSMutableArray<NSString *> *s_cameraStack;
-static dispatch_queue_t s_interruptionDeliveryQueue;
+static GeistCameraInterruptionDelivery *s_interruptionDelivery;
 static NSMutableSet<NSValue *> *s_deallocatingSessions;
 static NSUInteger s_nextStartOrder;
 static IMP s_origDealloc;
@@ -119,6 +120,7 @@ NSArray<AVCaptureSession *> *snapshotRunningSessions(void) {
 }
 
 static void notifyInterrupted(AVCaptureSession *session, NSInteger reason) {
+    geistcam_markerf("session %s interruption began reason=%ld", sessionID(session).UTF8String, (long)reason);
     interruptMovieFileOutputsForSession(session);
     NSDictionary *userInfo = @{ AVCaptureSessionInterruptionReasonKey: @(reason) };
     [[NSNotificationCenter defaultCenter] postNotificationName:AVCaptureSessionWasInterruptedNotification
@@ -127,6 +129,7 @@ static void notifyInterrupted(AVCaptureSession *session, NSInteger reason) {
 }
 
 static void notifyInterruptionEnded(AVCaptureSession *session) {
+    geistcam_markerf("session %s interruption ended", sessionID(session).UTF8String);
     [[NSNotificationCenter defaultCenter] postNotificationName:AVCaptureSessionInterruptionEndedNotification
                                                         object:session];
 }
@@ -136,20 +139,17 @@ static void enqueueCommittedInterruptionTransition(
     AVCaptureSession *session, GeistCameraInterruptionTransition transition, NSNumber *reason
 ) {
     if (transition == GeistCameraInterruptionTransitionUnchanged) return;
-    dispatch_async(s_interruptionDeliveryQueue, ^{
+    [s_interruptionDelivery enqueueAfterDraining:^{
         if (transition == GeistCameraInterruptionTransitionBegan) waitForSessionDeliveries(session);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (transition == GeistCameraInterruptionTransitionBegan) notifyInterrupted(session, reason.integerValue);
-            else notifyInterruptionEnded(session);
-        });
-    });
+    } delivery:^{
+        if (transition == GeistCameraInterruptionTransitionBegan) notifyInterrupted(session, reason.integerValue);
+        else notifyInterruptionEnded(session);
+    }];
 }
 
 static void waitForInterruptionNotifications(void) {
     if ([NSThread isMainThread]) return;
-    dispatch_sync(s_interruptionDeliveryQueue, ^{
-        dispatch_sync(dispatch_get_main_queue(), ^{});
-    });
+    [s_interruptionDelivery waitUntilDelivered];
 }
 
 static GeistCameraInterruptionTransition updateInterruptionReason(
@@ -541,7 +541,7 @@ void installLifecycleObservers(void) {
     s_allSessions = [NSHashTable hashTableWithOptions:weakPointerOptions];
     s_cameraStack = [NSMutableArray array];
     s_deallocatingSessions = [NSMutableSet set];
-    s_interruptionDeliveryQueue = dispatch_queue_create("com.noggenfogger.geistcam.interruptions", DISPATCH_QUEUE_SERIAL);
+    s_interruptionDelivery = [[GeistCameraInterruptionDelivery alloc] initWithDeliveryQueue:dispatch_get_main_queue()];
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
                                                       object:nil queue:nil usingBlock:^(NSNotification *note) {
         s_appBackgrounded = YES;
@@ -551,8 +551,10 @@ void installLifecycleObservers(void) {
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillEnterForegroundNotification
                                                       object:nil queue:nil usingBlock:^(NSNotification *note) {
         s_appBackgrounded = NO;
-        dispatch_async(dispatch_get_main_queue(), ^{ setBackgroundInterruption(NO); });
-        serverRecomputeAllSlots();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            setBackgroundInterruption(NO);
+            [s_interruptionDelivery afterPendingTransitions:^{ serverRecomputeAllSlots(); }];
+        });
     }];
 }
 
