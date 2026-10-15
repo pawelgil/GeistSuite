@@ -76,6 +76,7 @@ public actor GeistBroadcastSession {
     private var lastMicAuth: Bool = false
     private var pausedBroadcasts: Set<Broadcast> = []
     private var pendingControlRequests: [String: CheckedContinuation<Void, Error>] = [:]
+    private var pendingWriterFaultRequests: [String: CheckedContinuation<Data, Error>] = [:]
 
     // MARK: Computed Properties
 
@@ -290,6 +291,7 @@ public actor GeistBroadcastSession {
         controlTransport?.stop()
         hostConnection = nil
         extensionConnection = nil
+        failWriterFaultRequests()
         pausedBroadcasts.removeAll()
         transition(to: .stopped)
     }
@@ -328,6 +330,7 @@ public actor GeistBroadcastSession {
         if let extensionClient = extensionConnection {
             send(.finish, to: extensionClient)
             extensionConnection = nil
+            failWriterFaultRequests()
         }
         for broadcast in activeBroadcasts {
             activeBroadcasts.remove(broadcast)
@@ -498,6 +501,29 @@ public actor GeistBroadcastSession {
         pendingControlRequests.removeValue(forKey: requestID)?.resume(throwing: SessionError.controlTimedOut)
     }
 
+    public func writerFault(_ options: Data) async throws -> Data {
+        guard let connection = extensionConnection, !activeBroadcasts.isEmpty else { throw SessionError.notConnected }
+        let requestID = UUID().uuidString
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingWriterFaultRequests[requestID] = continuation
+            send(.writerFault(requestID: requestID, options: options), to: connection)
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                await self?.timeOutWriterFault(requestID)
+            }
+        }
+    }
+
+    private func timeOutWriterFault(_ requestID: String) {
+        pendingWriterFaultRequests.removeValue(forKey: requestID)?.resume(throwing: SessionError.controlTimedOut)
+    }
+
+    private func failWriterFaultRequests() {
+        let requests = pendingWriterFaultRequests.values
+        pendingWriterFaultRequests.removeAll()
+        for request in requests { request.resume(throwing: SessionError.notConnected) }
+    }
+
     private func transition(to newState: State) {
         state = newState
         delegate?.session(self, stateChanged: newState)
@@ -513,6 +539,7 @@ public actor GeistBroadcastSession {
         if extensionConnection == connection {
             log.notice("[Session \(hostBundleID)] extension connection closed (connection=\(String(describing: connection.id))) activeBroadcasts=\(activeBroadcasts.count) pending=\(pendingBroadcast != nil)")
             extensionConnection = nil
+            failWriterFaultRequests()
             let requests = pendingControlRequests.values
             pendingControlRequests.removeAll()
             for request in requests {
@@ -607,7 +634,11 @@ public actor GeistBroadcastSession {
         case let .controlAck(requestID):
             pendingControlRequests.removeValue(forKey: requestID)?.resume()
 
-        case .begin, .finish, .pause, .resume, .setMicAudioReadiness, .setMicDelivery, .state:
+        case let .writerFaultResponse(requestID, data):
+            guard extensionConnection == connection else { return }
+            pendingWriterFaultRequests.removeValue(forKey: requestID)?.resume(returning: data)
+
+        case .begin, .finish, .pause, .resume, .setMicAudioReadiness, .setMicDelivery, .state, .writerFault:
             break
         }
     }
@@ -627,6 +658,7 @@ public actor GeistBroadcastSession {
     private func connectExtension(_ connection: Connection, bundleID extensionBundleID: String) {
         log.notice("[Session \(hostBundleID)] helloExtension bundle=\(extensionBundleID) connection=\(String(describing: connection.id)) userConfirmedStart=\(userConfirmedStart) prevExtFD=\(String(describing: extensionConnection?.id))")
         if let old = extensionConnection {
+            failWriterFaultRequests()
             controlTransport?.shutdown(old.id)
         }
         cancelReaps()
@@ -662,6 +694,7 @@ public actor GeistBroadcastSession {
         if let extensionClient = extensionConnection {
             controlTransport?.shutdown(extensionClient.id)
             extensionConnection = nil
+            failWriterFaultRequests()
         }
         pendingBroadcast = nil
         userConfirmedStart = false

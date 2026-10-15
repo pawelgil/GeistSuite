@@ -12,6 +12,18 @@ let package = Package(
         // MARK: - GeistCore
 
         .target(
+            name: "MediaFaultShim",
+            path: "GeistCore/Sources/MediaFaultShim",
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedFramework("AVFoundation")]
+        ),
+        .testTarget(
+            name: "MediaFaultShimTests",
+            dependencies: ["MediaFaultShim"],
+            path: "GeistCore/Tests/MediaFaultShimTests"
+        ),
+
+        .target(
             name: "CoreSimulatorPrivate",
             path: "GeistCore/Sources/CoreSimulatorPrivate",
             publicHeadersPath: "include"

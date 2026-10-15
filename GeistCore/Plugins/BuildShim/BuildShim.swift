@@ -9,6 +9,9 @@ struct BuildShim: BuildToolPlugin {
     func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] {
         let packageRoot = context.package.directoryURL
         let outputDir = context.pluginWorkDirectoryURL
+        let faultsDir = packageRoot.appending(path: "GeistCore/Sources/MediaFaultShim")
+        let faultsCompile = try Self.gather(under: faultsDir, extensions: ["m"])
+        let faultsInputs = try Self.gather(under: faultsDir, extensions: Self.trackedExtensions)
 
         switch target.name {
         case "GeistCamera":
@@ -21,9 +24,9 @@ struct BuildShim: BuildToolPlugin {
                     name: "GeistCamShim",
                     modeDir: cameraShimDir,
                     outputDir: outputDir,
-                    headerSearchDirs: [cameraShimCoreDir],
-                    coreCompile: cameraCompile,
-                    coreInputs: cameraInputs
+                    headerSearchDirs: [cameraShimCoreDir, faultsDir],
+                    coreCompile: cameraCompile + faultsCompile,
+                    coreInputs: cameraInputs + faultsInputs
                 ),
             ]
 
@@ -49,9 +52,9 @@ struct BuildShim: BuildToolPlugin {
                     name: "GeistBroadcastExtensionShim",
                     modeDir: broadcastExtShimDir,
                     outputDir: outputDir,
-                    headerSearchDirs: [sharedShimDir, broadcastShimCoreDir],
-                    coreCompile: sharedCompile + broadcastCompile,
-                    coreInputs: sharedInputs + broadcastInputs
+                    headerSearchDirs: [sharedShimDir, broadcastShimCoreDir, faultsDir],
+                    coreCompile: sharedCompile + broadcastCompile + faultsCompile,
+                    coreInputs: sharedInputs + broadcastInputs + faultsInputs
                 ),
             ]
 

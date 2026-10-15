@@ -1,5 +1,6 @@
 #import "Session.h"
 #import "ActiveFormat.h"
+#import "GMMediaFaults.h"
 #import "Metadata.h"
 #import "OutputBinding.h"
 #import "Outputs.h"
@@ -501,7 +502,10 @@ NSDictionary *cameraHandleControlRequest(NSDictionary *request) {
     __block BOOL enqueuedNotification = NO;
     NSString *command = request[@"command"];
     void (^work)(void) = ^{
-        if ([command isEqualToString:@"status"]) {
+        if ([command isEqualToString:@"mediaFault"]) {
+            NSDictionary *result = [[GMMediaFaults controller] handle:request] ?: @{@"error": @"Media fault hooks are unavailable in this process"};
+            payload = result[@"error"] ? result : @{@"data": result};
+        } else if ([command isEqualToString:@"status"]) {
             @synchronized (s_allSessions) { payload = @{ @"data": statusPayload() }; }
         } else if ([command isEqualToString:@"interrupt"]) {
             payload = manualInterruption(request, NO, &enqueuedNotification);

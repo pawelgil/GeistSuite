@@ -1,4 +1,5 @@
 #import "Server.h"
+#import "GMMediaFaults.h"
 #import "AudioInput.h"
 #import "ActiveFormat.h"
 #import "Dispatch.h"
@@ -141,6 +142,8 @@ static void *acceptThread(void *arg) {
 
         readLoop(fd);
         audioInputDiscard();
+        [[GMMediaFaults controller] handle:@{@"kind": @"writer", @"action": @"clear"}];
+        [[GMMediaFaults controller] handle:@{@"kind": @"export", @"action": @"clear"}];
 
         pthread_mutex_lock(&s_connMutex);
         if (s_conn_fd == fd) s_conn_fd = -1;
